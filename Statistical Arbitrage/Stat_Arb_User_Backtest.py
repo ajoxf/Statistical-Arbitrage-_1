@@ -494,6 +494,24 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     symbol1 = inputs['ticker1']
     symbol2 = inputs['ticker2']
 
+    # Calculate trading statistics
+    position_changes = df_strategy['position'].diff().fillna(0)
+    entries = ((position_changes != 0) & (df_strategy['position'] != 0)).sum()
+    exits = ((position_changes != 0) & (df_strategy['position'] == 0)).sum()
+    num_round_trips = min(entries, exits)  # Complete round-trip trades
+
+    # Calculate total transaction costs
+    total_transaction_costs = df_strategy['transaction_costs'].sum()
+    total_transaction_costs_dollars = total_transaction_costs * INITIAL_CAPITAL
+
+    # Calculate gross vs net returns
+    gross_return = (1 + df_strategy['strategy_returns_gross'].fillna(0)).prod() - 1
+    net_return = metrics['total_return']
+
+    # Final values
+    gross_final_value = INITIAL_CAPITAL * (1 + gross_return)
+    net_final_value = final_value
+
     # Determine quality rating
     quality_score = pair_analysis['quality_score']
     if quality_score >= 80:
@@ -816,7 +834,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <div>
                     <h3 style="margin-bottom: 15px; color: #1a237e;">Return Metrics</h3>
                     <table class="metrics-table">
-                        <tr><td>Total Return</td><td><strong>{metrics['total_return']:.2%}</strong></td></tr>
+                        <tr><td>Total Return (Net)</td><td><strong>{metrics['total_return']:.2%}</strong></td></tr>
                         <tr><td>Annual Return (CAGR)</td><td><strong>{metrics['annual_return']:.2%}</strong></td></tr>
                         <tr><td>Volatility (Annual)</td><td>{metrics['volatility']:.2%}</td></tr>
                         <tr><td>Sharpe Ratio</td><td><strong>{metrics['sharpe_ratio']:.2f}</strong></td></tr>
@@ -833,6 +851,40 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                         <tr><td>Average Loss</td><td style="color: #F44336;">-{metrics['avg_loss']*100:.3f}%</td></tr>
                     </table>
                 </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Trading Statistics & Fees</h2>
+
+            <div class="two-column">
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Trade Count</h3>
+                    <table class="metrics-table">
+                        <tr><td>Total Entries</td><td><strong>{entries}</strong></td></tr>
+                        <tr><td>Total Exits</td><td><strong>{exits}</strong></td></tr>
+                        <tr><td>Round-Trip Trades</td><td><strong>{num_round_trips}</strong></td></tr>
+                        <tr><td>Trading Days</td><td>{len(df):,}</td></tr>
+                        <tr><td>Avg Days Between Trades</td><td>{len(df) / max(num_round_trips, 1):.1f}</td></tr>
+                    </table>
+                </div>
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Transaction Costs Impact</h3>
+                    <table class="metrics-table">
+                        <tr><td>Cost per Trade</td><td>{TRANSACTION_COST*100:.2f}%</td></tr>
+                        <tr><td>Total Fees Paid</td><td><strong style="color: #F44336;">${total_transaction_costs_dollars:,.2f}</strong></td></tr>
+                        <tr><td>Fees as % of Capital</td><td style="color: #F44336;">{total_transaction_costs*100:.2f}%</td></tr>
+                        <tr><td>Gross Return (Before Fees)</td><td style="color: #4CAF50;">{gross_return:.2%}</td></tr>
+                        <tr><td>Net Return (After Fees)</td><td><strong>{net_return:.2%}</strong></td></tr>
+                    </table>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <strong>Understanding Trading Costs:</strong><br>
+                Transaction costs of {TRANSACTION_COST*100:.2f}% are applied each time a position changes.
+                Over {num_round_trips} round-trip trades, total fees of <strong>${total_transaction_costs_dollars:,.2f}</strong> reduced your gross return of {gross_return:.2%} to a net return of {net_return:.2%}.
+                {'<br><br><span style="color: #F44336;">⚠️ High trading frequency is significantly impacting returns. Consider increasing the lookback period or entry threshold.</span>' if total_transaction_costs > 0.05 else ''}
             </div>
         </div>
 
