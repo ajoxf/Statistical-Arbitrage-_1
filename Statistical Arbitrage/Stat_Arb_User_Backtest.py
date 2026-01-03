@@ -889,6 +889,93 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     return html_content
 
 # =============================================================================
+# GITHUB UPLOAD FUNCTIONS
+# =============================================================================
+
+def get_script_directory():
+    """Get the directory where this script is located"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+def ensure_reports_folder():
+    """Create reports folder if it doesn't exist"""
+    script_dir = get_script_directory()
+    reports_dir = os.path.join(script_dir, 'reports')
+    if not os.path.exists(reports_dir):
+        os.makedirs(reports_dir)
+        print(f"Created reports folder: {reports_dir}")
+    return reports_dir
+
+def upload_to_github(report_path, ticker1, ticker2):
+    """Commit and push the report to GitHub"""
+    import subprocess
+
+    script_dir = get_script_directory()
+    repo_dir = os.path.dirname(script_dir)  # Go up one level to repo root
+
+    try:
+        # Get relative path for git
+        rel_path = os.path.relpath(report_path, repo_dir)
+
+        print("\nUploading to GitHub...")
+
+        # Add the file
+        result = subprocess.run(
+            ['git', 'add', rel_path],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"Error adding file: {result.stderr}")
+            return False
+
+        # Commit
+        commit_msg = f"Add backtest report: {ticker1} vs {ticker2}"
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_msg],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            if "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
+                print("File already committed.")
+            else:
+                print(f"Error committing: {result.stderr}")
+                return False
+
+        # Push
+        result = subprocess.run(
+            ['git', 'push'],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Try with origin main
+            result = subprocess.run(
+                ['git', 'push', 'origin', 'main'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                print(f"Error pushing: {result.stderr}")
+                print("\nYou can manually push later with: git push origin main")
+                return False
+
+        print("Successfully uploaded to GitHub!")
+        return True
+
+    except FileNotFoundError:
+        print("Git is not installed or not in PATH.")
+        print("Please install Git or manually commit and push the report.")
+        return False
+    except Exception as e:
+        print(f"Error uploading to GitHub: {e}")
+        return False
+
+# =============================================================================
 # MAIN EXECUTION
 # =============================================================================
 
@@ -953,30 +1040,44 @@ def run_backtest():
         inputs, df, df_strategy, pair_analysis, metrics, charts, final_value
     )
 
-    # Save report
+    # Ensure reports folder exists and save report there
+    reports_dir = ensure_reports_folder()
     report_filename = f"Backtest_Report_{inputs['ticker1']}_{inputs['ticker2']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    report_path = os.path.join(reports_dir, report_filename)
 
-    with open(report_filename, 'w', encoding='utf-8') as f:
+    with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
 
     print("\n" + "="*60)
     print("BACKTEST COMPLETE!")
     print("="*60)
-    print(f"\nReport saved as: {report_filename}")
+    print(f"\nReport saved to: {report_path}")
     print(f"\nTo view the report:")
     print(f"  1. Open the HTML file in any web browser")
     print(f"  2. To save as PDF: Press Ctrl+P (or Cmd+P) and select 'Save as PDF'")
-    print("\n" + "="*60)
 
     # Try to open the report automatically
     try:
         import webbrowser
-        webbrowser.open(report_filename)
-        print("Report opened in your default web browser.")
+        webbrowser.open('file://' + os.path.abspath(report_path))
+        print("\nReport opened in your default web browser.")
     except:
         pass
 
-    return report_filename
+    # Ask about GitHub upload
+    print("\n" + "-"*60)
+    upload_choice = input("Would you like to upload this report to GitHub? (y/n): ").strip().lower()
+
+    if upload_choice == 'y':
+        upload_to_github(report_path, inputs['ticker1'], inputs['ticker2'])
+    else:
+        print("\nReport saved locally. You can upload later by running:")
+        print(f"  git add \"{report_path}\"")
+        print(f"  git commit -m \"Add backtest report\"")
+        print(f"  git push origin main")
+
+    print("\n" + "="*60)
+    return report_path
 
 if __name__ == "__main__":
     run_backtest()
