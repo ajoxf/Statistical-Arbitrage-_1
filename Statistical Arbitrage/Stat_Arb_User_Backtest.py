@@ -94,12 +94,41 @@ def get_user_inputs():
         except ValueError:
             print("Invalid date format. Please use YYYY-MM-DD (e.g., 2024-01-01)")
 
+    # Get lookback period
+    print("\n" + "-"*60)
+    print("STRATEGY PARAMETERS")
+    print("-"*60)
+    print("\nLookback Period: Number of trading days used to calculate")
+    print("the 'normal' spread behavior (moving average & std deviation).")
+    print("\n  Suggested values:")
+    print("    30 days  - Short-term, more trades, higher risk")
+    print("    60 days  - Medium-term, balanced approach")
+    print("    90 days  - Default, good for most pairs")
+    print("    120 days - Long-term, fewer trades, more stable")
+    print("-"*60)
+
+    while True:
+        lookback_input = input(f"\nLookback period in days [default: {DEFAULT_LOOKBACK_PERIOD}]: ").strip()
+        if lookback_input == "":
+            lookback_period = DEFAULT_LOOKBACK_PERIOD
+            break
+        try:
+            lookback_period = int(lookback_input)
+            if 10 <= lookback_period <= 365:
+                break
+            else:
+                print("Please enter a value between 10 and 365 days.")
+        except ValueError:
+            print("Please enter a valid number (or press Enter for default).")
+
     # Summary
     print("\n" + "="*60)
     print("BACKTEST CONFIGURATION:")
     print("="*60)
     print(f"  Pair: {ticker1} vs {ticker2}")
     print(f"  Period: {start_date} to {end_date}")
+    print(f"  Lookback Period: {lookback_period} days")
+    print(f"  Entry Threshold: {DEFAULT_STD_DEV_THRESHOLD} standard deviations")
     print(f"  Initial Capital: ${INITIAL_CAPITAL:,}")
     print("="*60)
 
@@ -112,7 +141,8 @@ def get_user_inputs():
         'ticker1': ticker1,
         'ticker2': ticker2,
         'start_date': start_date,
-        'end_date': end_date
+        'end_date': end_date,
+        'lookback_period': lookback_period
     }
 
 # =============================================================================
@@ -213,11 +243,11 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
         'spread': spread
     }
 
-def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis):
+def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None):
     """Calculate strategy returns with transaction costs"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
-    lookback = DEFAULT_LOOKBACK_PERIOD
+    lookback = lookback_period if lookback_period else DEFAULT_LOOKBACK_PERIOD
     std_threshold = DEFAULT_STD_DEV_THRESHOLD
 
     # Calculate bands
@@ -860,7 +890,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
 
             <h3 style="margin: 20px 0 15px; color: #1a237e;">Strategy Parameters Used</h3>
             <table class="metrics-table">
-                <tr><td>Lookback Period</td><td>{DEFAULT_LOOKBACK_PERIOD} days</td></tr>
+                <tr><td>Lookback Period</td><td>{inputs['lookback_period']} days</td></tr>
                 <tr><td>Entry Threshold</td><td>{DEFAULT_STD_DEV_THRESHOLD} standard deviations</td></tr>
                 <tr><td>Exit Threshold</td><td>Mean (0 standard deviations)</td></tr>
                 <tr><td>Transaction Cost</td><td>{TRANSACTION_COST*100:.2f}% per trade</td></tr>
@@ -1012,8 +1042,8 @@ def run_backtest():
     print(f"  - Quality Score: {pair_analysis['quality_score']:.1f}/100")
 
     # Calculate strategy
-    print("Calculating strategy returns...")
-    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis)
+    print(f"Calculating strategy returns (lookback: {inputs['lookback_period']} days)...")
+    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis, inputs['lookback_period'])
 
     # Calculate metrics
     print("Calculating performance metrics...")
