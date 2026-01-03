@@ -34,8 +34,29 @@ DEFAULT_STD_DEV_THRESHOLD = 1.5
 DEFAULT_FORMATION_PERIOD = 120
 USE_LOG_PRICES = True
 INITIAL_CAPITAL = 100000
-TRANSACTION_COST = 0.001  # 0.1% per trade
+POSITION_SIZE_PER_LEG = 50000  # $50k per leg (half of capital)
 MIN_OBSERVATIONS = 100
+
+# =============================================================================
+# IBKR REALISTIC TRANSACTION COST STRUCTURE
+# =============================================================================
+
+IBKR_FEES = {
+    'commission_per_share': 0.005,    # $0.005 per share
+    'min_commission': 1.00,           # $1.00 minimum per order
+    'max_commission_pct': 0.01,       # 1% max of trade value
+    'sec_fee_rate': 0.0000278,        # SEC fee (sales only)
+    'finra_taf': 0.000166,            # FINRA TAF (sales only)
+    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps bid-ask spread cost
+}
+
+# ETF symbols that are typically commission-free on IBKR
+COMMISSION_FREE_ETFS = {
+    'SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TLT', 'HYG', 'LQD', 'EFA', 'EEM',
+    'VTI', 'VEA', 'VWO', 'XLF', 'XLK', 'XLE', 'XLV', 'XLI', 'XLB', 'XLP',
+    'XLY', 'XLU', 'GDX', 'GDXJ', 'USO', 'UNG', 'TIP', 'IEF', 'AGG', 'BND',
+    'VNQ', 'ARKK', 'DIA', 'VOO', 'IVV', 'VTV', 'VUG', 'VIG', 'SCHD'
+}
 
 # =============================================================================
 # USER INPUT FUNCTIONS
@@ -243,8 +264,58 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
         'spread': spread
     }
 
+def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
+    """
+    Calculate realistic IBKR transaction costs
+
+    Components:
+    - Commission: $0.005/share (min $1, max 1% of trade)
+    - SEC fee: 0.00278% (sells only)
+    - FINRA TAF: 0.0166% (sells only)
+    - Bid-ask spread: ~2.5 bps estimate
+    """
+    if shares_traded == 0 or price == 0:
+        return 0.0, {}
+
+    trade_value = abs(shares_traded * price)
+    is_sell = shares_traded < 0
+
+    # Commission (check if commission-free ETF)
+    if symbol.upper() in COMMISSION_FREE_ETFS:
+        commission = 0.0
+        is_commission_free = True
+    else:
+        commission = max(
+            IBKR_FEES['min_commission'],
+            min(abs(shares_traded) * IBKR_FEES['commission_per_share'],
+                trade_value * IBKR_FEES['max_commission_pct'])
+        )
+        is_commission_free = False
+
+    # Regulatory fees (sells only)
+    sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
+    finra_fee = trade_value * IBKR_FEES['finra_taf'] if is_sell else 0
+
+    # Bid-ask spread cost (both buys and sells)
+    spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
+
+    total_cost = commission + sec_fee + finra_fee + spread_cost
+    cost_pct = total_cost / trade_value if trade_value > 0 else 0
+
+    # Return breakdown for reporting
+    breakdown = {
+        'commission': commission,
+        'sec_fee': sec_fee,
+        'finra_fee': finra_fee,
+        'spread_cost': spread_cost,
+        'total': total_cost,
+        'is_commission_free': is_commission_free
+    }
+
+    return cost_pct, breakdown
+
 def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None):
-    """Calculate strategy returns with transaction costs"""
+    """Calculate strategy returns with realistic IBKR transaction costs"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
     lookback = lookback_period if lookback_period else DEFAULT_LOOKBACK_PERIOD
@@ -288,7 +359,48 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['returns_1'] = df[symbol1].pct_change()
     df_strategy['returns_2'] = df[symbol2].pct_change()
 
-    # Position sizing
+    # Position sizing - calculate actual shares based on position size per leg
+    df_strategy['shares_1'] = (df_strategy['position'] * POSITION_SIZE_PER_LEG / df[symbol1]).round()
+    df_strategy['shares_2'] = (-df_strategy['position'] * hedge_ratio * POSITION_SIZE_PER_LEG / df[symbol2]).round()
+
+    # Calculate position changes in shares
+    df_strategy['shares_1_change'] = df_strategy['shares_1'].diff().fillna(0)
+    df_strategy['shares_2_change'] = df_strategy['shares_2'].diff().fillna(0)
+
+    # Calculate IBKR transaction costs
+    df_strategy['cost_1'] = 0.0
+    df_strategy['cost_2'] = 0.0
+    df_strategy['commission_1'] = 0.0
+    df_strategy['commission_2'] = 0.0
+    df_strategy['sec_fee'] = 0.0
+    df_strategy['finra_fee'] = 0.0
+    df_strategy['spread_cost'] = 0.0
+
+    for i in range(len(df_strategy)):
+        if df_strategy['shares_1_change'].iloc[i] != 0:
+            cost_pct, breakdown = calculate_ibkr_transaction_costs(
+                symbol1, df[symbol1].iloc[i], df_strategy['shares_1_change'].iloc[i]
+            )
+            df_strategy.iloc[i, df_strategy.columns.get_loc('cost_1')] = cost_pct
+            df_strategy.iloc[i, df_strategy.columns.get_loc('commission_1')] = breakdown.get('commission', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('sec_fee')] += breakdown.get('sec_fee', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('finra_fee')] += breakdown.get('finra_fee', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('spread_cost')] += breakdown.get('spread_cost', 0)
+
+        if df_strategy['shares_2_change'].iloc[i] != 0:
+            cost_pct, breakdown = calculate_ibkr_transaction_costs(
+                symbol2, df[symbol2].iloc[i], df_strategy['shares_2_change'].iloc[i]
+            )
+            df_strategy.iloc[i, df_strategy.columns.get_loc('cost_2')] = cost_pct
+            df_strategy.iloc[i, df_strategy.columns.get_loc('commission_2')] = breakdown.get('commission', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('sec_fee')] += breakdown.get('sec_fee', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('finra_fee')] += breakdown.get('finra_fee', 0)
+            df_strategy.iloc[i, df_strategy.columns.get_loc('spread_cost')] += breakdown.get('spread_cost', 0)
+
+    # Total transaction costs as percentage
+    df_strategy['transaction_costs'] = df_strategy['cost_1'] + df_strategy['cost_2']
+
+    # Position weights for return calculation
     df_strategy['pos_1'] = df_strategy['position']
     df_strategy['pos_2'] = -df_strategy['position'] * hedge_ratio
 
@@ -298,11 +410,7 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
         df_strategy['pos_2'].shift(1) * df_strategy['returns_2']
     )
 
-    # Transaction costs
-    position_changes = df_strategy['position'].diff().abs()
-    df_strategy['transaction_costs'] = position_changes * TRANSACTION_COST
-
-    # Net returns
+    # Net returns after IBKR transaction costs
     df_strategy['strategy_returns'] = (
         df_strategy['strategy_returns_gross'] - df_strategy['transaction_costs']
     )
@@ -500,9 +608,20 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     exits = ((position_changes != 0) & (df_strategy['position'] == 0)).sum()
     num_round_trips = min(entries, exits)  # Complete round-trip trades
 
-    # Calculate total transaction costs
+    # Calculate total transaction costs (percentage)
     total_transaction_costs = df_strategy['transaction_costs'].sum()
     total_transaction_costs_dollars = total_transaction_costs * INITIAL_CAPITAL
+
+    # Calculate IBKR fee breakdown in dollars
+    total_commissions = df_strategy['commission_1'].sum() + df_strategy['commission_2'].sum()
+    total_sec_fees = df_strategy['sec_fee'].sum()
+    total_finra_fees = df_strategy['finra_fee'].sum()
+    total_spread_costs = df_strategy['spread_cost'].sum()
+    total_fees_dollars = total_commissions + total_sec_fees + total_finra_fees + total_spread_costs
+
+    # Check if ETFs are commission-free
+    symbol1_commission_free = symbol1.upper() in COMMISSION_FREE_ETFS
+    symbol2_commission_free = symbol2.upper() in COMMISSION_FREE_ETFS
 
     # Calculate gross vs net returns
     gross_return = (1 + df_strategy['strategy_returns_gross'].fillna(0)).prod() - 1
@@ -855,7 +974,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
         </div>
 
         <div class="section">
-            <h2 class="section-title">Trading Statistics & Fees</h2>
+            <h2 class="section-title">Trading Statistics & IBKR Fees</h2>
 
             <div class="two-column">
                 <div>
@@ -869,22 +988,57 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                     </table>
                 </div>
                 <div>
-                    <h3 style="margin-bottom: 15px; color: #1a237e;">Transaction Costs Impact</h3>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Returns Impact</h3>
                     <table class="metrics-table">
-                        <tr><td>Cost per Trade</td><td>{TRANSACTION_COST*100:.2f}%</td></tr>
-                        <tr><td>Total Fees Paid</td><td><strong style="color: #F44336;">${total_transaction_costs_dollars:,.2f}</strong></td></tr>
-                        <tr><td>Fees as % of Capital</td><td style="color: #F44336;">{total_transaction_costs*100:.2f}%</td></tr>
                         <tr><td>Gross Return (Before Fees)</td><td style="color: #4CAF50;">{gross_return:.2%}</td></tr>
+                        <tr><td>Total Fees Paid</td><td><strong style="color: #F44336;">${total_fees_dollars:,.2f}</strong></td></tr>
+                        <tr><td>Fees as % of Capital</td><td style="color: #F44336;">{(total_fees_dollars/INITIAL_CAPITAL)*100:.3f}%</td></tr>
                         <tr><td>Net Return (After Fees)</td><td><strong>{net_return:.2%}</strong></td></tr>
+                        <tr><td>Fee Drag on Returns</td><td style="color: #F44336;">{(gross_return - net_return):.2%}</td></tr>
                     </table>
                 </div>
             </div>
 
-            <div class="info-box">
-                <strong>Understanding Trading Costs:</strong><br>
-                Transaction costs of {TRANSACTION_COST*100:.2f}% are applied each time a position changes.
-                Over {num_round_trips} round-trip trades, total fees of <strong>${total_transaction_costs_dollars:,.2f}</strong> reduced your gross return of {gross_return:.2%} to a net return of {net_return:.2%}.
-                {'<br><br><span style="color: #F44336;">⚠️ High trading frequency is significantly impacting returns. Consider increasing the lookback period or entry threshold.</span>' if total_transaction_costs > 0.05 else ''}
+            <h3 style="margin: 25px 0 15px; color: #1a237e;">IBKR Fee Breakdown</h3>
+            <table class="metrics-table">
+                <tr>
+                    <th>Fee Type</th>
+                    <th>Amount</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td>Commissions</td>
+                    <td>${total_commissions:,.2f}</td>
+                    <td>$0.005/share (min $1, max 1%) {' - <span style="color: #4CAF50;">Commission-free ETFs detected!</span>' if (symbol1_commission_free or symbol2_commission_free) else ''}</td>
+                </tr>
+                <tr>
+                    <td>SEC Fee</td>
+                    <td>${total_sec_fees:,.2f}</td>
+                    <td>0.00278% on sales only</td>
+                </tr>
+                <tr>
+                    <td>FINRA TAF</td>
+                    <td>${total_finra_fees:,.2f}</td>
+                    <td>0.0166% on sales only</td>
+                </tr>
+                <tr>
+                    <td>Bid-Ask Spread</td>
+                    <td>${total_spread_costs:,.2f}</td>
+                    <td>Estimated 2.5 bps per trade</td>
+                </tr>
+                <tr style="background: #f8f9fa; font-weight: bold;">
+                    <td>TOTAL FEES</td>
+                    <td style="color: #F44336;">${total_fees_dollars:,.2f}</td>
+                    <td></td>
+                </tr>
+            </table>
+
+            <div class="{'success-box' if (symbol1_commission_free and symbol2_commission_free) else 'info-box'}">
+                <strong>{'Commission-Free Pair!' if (symbol1_commission_free and symbol2_commission_free) else 'IBKR Fee Summary:'}</strong><br>
+                {f'Both {symbol1} and {symbol2} are commission-free ETFs on IBKR, significantly reducing trading costs.' if (symbol1_commission_free and symbol2_commission_free) else f'{symbol1} is commission-free.' if symbol1_commission_free else f'{symbol2} is commission-free.' if symbol2_commission_free else 'Standard IBKR commission rates apply to both symbols.'}
+                <br><br>
+                Over {num_round_trips} round-trip trades, total IBKR fees of <strong>${total_fees_dollars:,.2f}</strong> reduced your gross return of {gross_return:.2%} to a net return of {net_return:.2%}.
+                {'<br><br><span style="color: #F44336;">⚠️ High trading frequency is significantly impacting returns. Consider increasing the lookback period or entry threshold.</span>' if total_fees_dollars > (INITIAL_CAPITAL * 0.02) else ''}
             </div>
         </div>
 
@@ -945,8 +1099,9 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <tr><td>Lookback Period</td><td>{inputs['lookback_period']} days</td></tr>
                 <tr><td>Entry Threshold</td><td>{DEFAULT_STD_DEV_THRESHOLD} standard deviations</td></tr>
                 <tr><td>Exit Threshold</td><td>Mean (0 standard deviations)</td></tr>
-                <tr><td>Transaction Cost</td><td>{TRANSACTION_COST*100:.2f}% per trade</td></tr>
                 <tr><td>Initial Capital</td><td>${INITIAL_CAPITAL:,}</td></tr>
+                <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
+                <tr><td>Fee Model</td><td>IBKR Realistic (commission + SEC + FINRA + spread)</td></tr>
             </table>
         </div>
 
