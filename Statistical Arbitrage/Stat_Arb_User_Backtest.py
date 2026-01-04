@@ -43,25 +43,31 @@ MIN_OBSERVATIONS = 100
 # =============================================================================
 
 IBKR_FEES = {
-    # IBKR Fixed Pricing Commission
+    # IBKR Fixed Pricing Commission (US Stocks)
     'commission_per_share': 0.005,    # $0.005 per share
     'min_commission': 1.00,           # $1.00 minimum per order
     'max_commission_pct': 0.01,       # 1% max of trade value
 
-    # SEC Section 31 Fee (sales only)
+    # SEC Section 31 Fee (sales only, US equities only)
     # Rate: $27.80 per million ($0.0000278 per dollar) through May 13, 2025
     # Rate: $0.00 per million after May 14, 2025
     # Source: https://www.sec.gov/rules-regulations/fee-rate-advisories/2025-2
     'sec_fee_rate': 0.0000278,        # $27.80 per million for historical backtests
 
-    # FINRA Trading Activity Fee (TAF) - PER SHARE, not percentage!
+    # FINRA Trading Activity Fee (TAF) - PER SHARE, not percentage! (US equities only)
     # Rate: $0.000166 per share (max $8.30 per trade)
     # Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
     'finra_taf_per_share': 0.000166,  # $0.000166 per share for sales
     'finra_taf_max': 8.30,            # Maximum $8.30 per trade
 
     # Estimated bid-ask spread cost
-    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps (0.025%) per trade
+    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps (0.025%) per trade for stocks
+    'bid_ask_spread_bps_forex': 0.5,  # Forex typically has tighter spreads (0.5 bps)
+
+    # IBKR Forex Commission (basis points on trade value, NOT per share)
+    # Source: https://www.interactivebrokers.com/en/pricing/commissions-spot-currencies.php
+    'forex_commission_bps': 2.0,      # 0.2 bps = 0.00002 (using 2 bps as conservative estimate)
+    'forex_min_commission': 2.00,     # $2.00 minimum per forex order
 }
 
 # ETF symbols that are typically commission-free on IBKR
@@ -183,6 +189,36 @@ def get_user_inputs():
         except ValueError:
             print("Please enter a valid number (or press Enter for default).")
 
+    # Get stop-loss threshold
+    print("\n" + "-"*60)
+    print("STOP-LOSS THRESHOLD (Standard Deviations)")
+    print("-"*60)
+    print("\nThis controls when to exit a losing trade to limit losses.")
+    print("If the z-score moves FURTHER against your position beyond this")
+    print("threshold, the trade will be closed.")
+    print("\n  Example: Entry at -1.5σ, Stop-loss at 3.0σ")
+    print("           If z-score drops to -3.0σ, exit to cut losses.")
+    print("\n  Suggested values:")
+    print("    2.5 σ - Tight stop, exits quickly if trade goes wrong")
+    print("    3.0 σ - Default, balanced risk management")
+    print("    4.0 σ - Wide stop, gives trade more room to recover")
+    print("    0   - No stop-loss (risky!)")
+    print("-"*60)
+
+    while True:
+        stop_input = input(f"\nStop-loss threshold [default: 3.0, 0=disabled]: ").strip()
+        if stop_input == "":
+            stop_loss_threshold = 3.0
+            break
+        try:
+            stop_loss_threshold = float(stop_input)
+            if 0 <= stop_loss_threshold <= 5.0:
+                break
+            else:
+                print("Please enter a value between 0 and 5.0.")
+        except ValueError:
+            print("Please enter a valid number (or press Enter for default).")
+
     # Summary
     print("\n" + "="*60)
     print("BACKTEST CONFIGURATION:")
@@ -191,6 +227,10 @@ def get_user_inputs():
     print(f"  Period: {start_date} to {end_date}")
     print(f"  Lookback Period: {lookback_period} days")
     print(f"  Entry Threshold: {std_threshold} standard deviations")
+    if stop_loss_threshold > 0:
+        print(f"  Stop-Loss: {stop_loss_threshold} standard deviations")
+    else:
+        print(f"  Stop-Loss: Disabled")
     print(f"  Initial Capital: ${INITIAL_CAPITAL:,}")
     print("="*60)
 
@@ -205,7 +245,8 @@ def get_user_inputs():
         'start_date': start_date,
         'end_date': end_date,
         'lookback_period': lookback_period,
-        'std_threshold': std_threshold
+        'std_threshold': std_threshold,
+        'stop_loss_threshold': stop_loss_threshold
     }
 
 # =============================================================================
@@ -323,11 +364,27 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
         'spread': spread
     }
 
+def is_forex_symbol(symbol):
+    """Check if symbol is a forex/currency pair (Yahoo Finance uses =X suffix)"""
+    symbol_upper = symbol.upper()
+    # Yahoo Finance forex symbols end with =X (e.g., EURUSD=X, GBPCHF=X)
+    if symbol_upper.endswith('=X'):
+        return True
+    # Common forex pair patterns
+    forex_pairs = ['EUR', 'USD', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD', 'CNY', 'HKD']
+    # Check if symbol contains two currency codes
+    for curr1 in forex_pairs:
+        for curr2 in forex_pairs:
+            if curr1 != curr2 and (f'{curr1}{curr2}' in symbol_upper or f'{curr2}{curr1}' in symbol_upper):
+                return True
+    return False
+
+
 def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     """
     Calculate realistic IBKR transaction costs based on official rates.
 
-    Components (sources verified January 2025):
+    For US Stocks (sources verified January 2025):
     - Commission: $0.005/share (min $1, max 1% of trade)
       Source: https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
     - SEC Section 31 Fee: $27.80 per million (sells only)
@@ -335,6 +392,12 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     - FINRA TAF: $0.000166 per SHARE, max $8.30 per trade (sells only)
       Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
     - Bid-ask spread: ~2.5 bps estimate (market impact)
+
+    For Forex:
+    - Commission: ~0.2 bps of trade value (using 2 bps as conservative estimate)
+      Source: https://www.interactivebrokers.com/en/pricing/commissions-spot-currencies.php
+    - No SEC fee or FINRA TAF (only applies to US equities)
+    - Tighter bid-ask spreads (~0.5 bps)
     """
     if shares_traded == 0 or price == 0:
         return 0.0, {}
@@ -342,35 +405,51 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     trade_value = abs(shares_traded * price)
     num_shares = abs(shares_traded)
     is_sell = shares_traded < 0
+    is_forex = is_forex_symbol(symbol)
 
-    # Commission (check if commission-free ETF)
-    if symbol.upper() in COMMISSION_FREE_ETFS:
-        commission = 0.0
-        is_commission_free = True
-    else:
-        # IBKR Fixed Pricing: $0.005/share, min $1, max 1% of trade value
+    if is_forex:
+        # Forex commission: basis points on trade value, NOT per share
         commission = max(
-            IBKR_FEES['min_commission'],
-            min(num_shares * IBKR_FEES['commission_per_share'],
-                trade_value * IBKR_FEES['max_commission_pct'])
+            IBKR_FEES['forex_min_commission'],
+            trade_value * (IBKR_FEES['forex_commission_bps'] / 10000)
         )
         is_commission_free = False
 
-    # SEC Section 31 Fee: $27.80 per million = 0.00278% (sells only)
-    sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
-
-    # FINRA TAF: $0.000166 PER SHARE with max $8.30 per trade (sells only)
-    # This is NOT a percentage - it's a flat per-share fee!
-    if is_sell:
-        finra_fee = min(
-            num_shares * IBKR_FEES['finra_taf_per_share'],
-            IBKR_FEES['finra_taf_max']
-        )
-    else:
+        # No SEC fee or FINRA TAF for forex
+        sec_fee = 0
         finra_fee = 0
 
-    # Bid-ask spread cost (market impact, both buys and sells)
-    spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
+        # Tighter bid-ask spread for forex
+        spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps_forex'] / 10000)
+
+    else:
+        # US Stock commission (check if commission-free ETF)
+        if symbol.upper() in COMMISSION_FREE_ETFS:
+            commission = 0.0
+            is_commission_free = True
+        else:
+            # IBKR Fixed Pricing: $0.005/share, min $1, max 1% of trade value
+            commission = max(
+                IBKR_FEES['min_commission'],
+                min(num_shares * IBKR_FEES['commission_per_share'],
+                    trade_value * IBKR_FEES['max_commission_pct'])
+            )
+            is_commission_free = False
+
+        # SEC Section 31 Fee: $27.80 per million = 0.00278% (sells only, US equities)
+        sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
+
+        # FINRA TAF: $0.000166 PER SHARE with max $8.30 per trade (sells only, US equities)
+        if is_sell:
+            finra_fee = min(
+                num_shares * IBKR_FEES['finra_taf_per_share'],
+                IBKR_FEES['finra_taf_max']
+            )
+        else:
+            finra_fee = 0
+
+        # Bid-ask spread cost (market impact, both buys and sells)
+        spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
 
     total_cost = commission + sec_fee + finra_fee + spread_cost
     cost_pct = total_cost / trade_value if trade_value > 0 else 0
@@ -382,17 +461,20 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
         'finra_fee': finra_fee,
         'spread_cost': spread_cost,
         'total': total_cost,
-        'is_commission_free': is_commission_free
+        'is_commission_free': is_commission_free,
+        'is_forex': is_forex
     }
 
     return cost_pct, breakdown
 
-def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None, std_threshold=None):
-    """Calculate strategy returns with realistic IBKR transaction costs"""
+def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None, std_threshold=None, stop_loss_threshold=None):
+    """Calculate strategy returns with realistic IBKR transaction costs and optional stop-loss"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
     lookback = lookback_period if lookback_period else DEFAULT_LOOKBACK_PERIOD
     std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
+    # Stop-loss: 0 or None means disabled
+    use_stop_loss = stop_loss_threshold is not None and stop_loss_threshold > 0
 
     # Calculate bands
     df_strategy = df.copy()
@@ -403,17 +485,38 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['lower_band'] = df_strategy['ma'] - std_threshold * df_strategy['std']
     df_strategy['z_score'] = (spread - df_strategy['ma']) / df_strategy['std']
 
-    # Generate signals
+    # Track stop-loss exits for reporting
+    df_strategy['stop_loss_exit'] = False
+
+    # Generate signals with stop-loss
     df_strategy['position'] = 0.0
     for i in range(lookback, len(df_strategy)):
         prev_pos = df_strategy['position'].iloc[i-1]
         current_spread = df_strategy['spread'].iloc[i]
+        current_zscore = df_strategy['z_score'].iloc[i]
         ma = df_strategy['ma'].iloc[i]
         upper = df_strategy['upper_band'].iloc[i]
         lower = df_strategy['lower_band'].iloc[i]
 
-        # Exit conditions
-        if prev_pos == 1 and current_spread >= ma:
+        # Check stop-loss condition first (if enabled)
+        # Long spread (position=1): we entered when z-score was negative (below -entry_threshold)
+        #   Stop-loss triggers if z-score goes MORE negative (below -stop_loss_threshold)
+        # Short spread (position=-1): we entered when z-score was positive (above +entry_threshold)
+        #   Stop-loss triggers if z-score goes MORE positive (above +stop_loss_threshold)
+        stop_loss_triggered = False
+        if use_stop_loss and prev_pos != 0:
+            if prev_pos == 1 and current_zscore < -stop_loss_threshold:
+                # Long spread hit stop-loss (spread diverged further down)
+                stop_loss_triggered = True
+            elif prev_pos == -1 and current_zscore > stop_loss_threshold:
+                # Short spread hit stop-loss (spread diverged further up)
+                stop_loss_triggered = True
+
+        if stop_loss_triggered:
+            df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
+            df_strategy.iloc[i, df_strategy.columns.get_loc('stop_loss_exit')] = True
+        # Normal exit conditions (mean reversion)
+        elif prev_pos == 1 and current_spread >= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
         elif prev_pos == -1 and current_spread <= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
@@ -542,6 +645,9 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
             exit_date = df_strategy.index[trade_end_idx]
             holding_days = (exit_date - entry_date).days
 
+            # Check if this was a stop-loss exit
+            is_stop_loss = df_strategy['stop_loss_exit'].iloc[trade_end_idx] if 'stop_loss_exit' in df_strategy.columns else False
+
             # Prices at entry and exit
             entry_price_1 = df[symbol1].iloc[trade_start_idx]
             entry_price_2 = df[symbol2].iloc[trade_start_idx]
@@ -612,7 +718,8 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
                 'total_fees': total_fees,
                 'net_pnl': net_pnl,
                 'return_pct': return_pct,
-                'capital_used': capital_used
+                'capital_used': capital_used,
+                'is_stop_loss': is_stop_loss
             })
 
             in_trade = False
@@ -684,10 +791,11 @@ def fig_to_base64(fig):
     plt.close(fig)
     return image_base64
 
-def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std_threshold=None):
+def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std_threshold=None, stop_loss_threshold=None):
     """Create all charts and return as base64 encoded images"""
     charts = {}
     std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
+    use_stop_loss = stop_loss_threshold is not None and stop_loss_threshold > 0
 
     # Set style
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -770,6 +878,14 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
     ax.axhline(y=0, color='black', linestyle='-', linewidth=1, label='Exit (Mean)')
     ax.fill_between(df_strategy.index, -std_threshold, std_threshold, alpha=0.1, color='gray')
 
+    # Add stop-loss lines if enabled
+    if use_stop_loss:
+        ax.axhline(y=stop_loss_threshold, color='#9C27B0', linestyle=':', linewidth=2, label=f'Stop-Loss (+{stop_loss_threshold}σ)')
+        ax.axhline(y=-stop_loss_threshold, color='#9C27B0', linestyle=':', linewidth=2, label=f'Stop-Loss (-{stop_loss_threshold}σ)')
+        # Shade the stop-loss zones
+        ax.fill_between(df_strategy.index, stop_loss_threshold, 5, alpha=0.05, color='#9C27B0')
+        ax.fill_between(df_strategy.index, -stop_loss_threshold, -5, alpha=0.05, color='#9C27B0')
+
     # Add trade markers on z-score chart
     if len(long_entries) > 0:
         ax.scatter(long_entries, df_strategy.loc[long_entries, 'z_score'],
@@ -781,12 +897,21 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
         ax.scatter(exits, df_strategy.loc[exits, 'z_score'],
                   marker='o', color='#FFC107', s=60, zorder=5, label='Exit', edgecolors='black', linewidths=0.5)
 
+    # Mark stop-loss exits separately
+    if 'stop_loss_exit' in df_strategy.columns:
+        stop_loss_exits = df_strategy[df_strategy['stop_loss_exit'] == True].index
+        if len(stop_loss_exits) > 0:
+            ax.scatter(stop_loss_exits, df_strategy.loc[stop_loss_exits, 'z_score'],
+                      marker='X', color='#9C27B0', s=100, zorder=6, label='Stop-Loss Exit', edgecolors='black', linewidths=0.5)
+
     ax.set_xlabel('Date', fontsize=12)
     ax.set_ylabel('Z-Score', fontsize=12)
     ax.set_title('Z-Score with Trade Signals', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(-4, 4)
+    # Adjust y-limits based on stop-loss threshold
+    y_limit = max(4, stop_loss_threshold + 1) if use_stop_loss else 4
+    ax.set_ylim(-y_limit, y_limit)
     charts['zscore'] = fig_to_base64(fig)
 
     # 5. Position Over Time
@@ -961,11 +1086,12 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
     for trade in trade_log:
         pnl_color = '#4CAF50' if trade['net_pnl'] > 0 else '#F44336'
         direction_icon = '📈' if trade['direction'] == 'Long Spread' else '📉'
+        stop_loss_marker = ' 🛑' if trade.get('is_stop_loss', False) else ''
 
         html += f'''
             <tr>
                 <td>{trade['trade_num']}</td>
-                <td>{direction_icon} {trade['direction']}</td>
+                <td>{direction_icon} {trade['direction']}{stop_loss_marker}</td>
                 <td>{trade['entry_date']}</td>
                 <td>{trade['exit_date']}</td>
                 <td>{trade['holding_days']}</td>
@@ -1005,6 +1131,7 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
             <li><strong>Long Spread:</strong> Bought {symbol1}, Sold {symbol2} (betting spread will increase)</li>
             <li><strong>Short Spread:</strong> Sold {symbol1}, Bought {symbol2} (betting spread will decrease)</li>
             <li><strong>Entry/Exit Z:</strong> Z-score at trade entry and exit (entry should be beyond threshold, exit near 0)</li>
+            <li><strong>🛑 Stop-Loss:</strong> Trade was exited due to stop-loss trigger (z-score exceeded stop-loss threshold)</li>
             <li><strong>Fees:</strong> IBKR commission + SEC fee + FINRA TAF + bid-ask spread</li>
         </ul>
     </div>
@@ -1510,6 +1637,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <tr><td>Lookback Period</td><td>{inputs['lookback_period']} days</td></tr>
                 <tr><td>Entry Threshold</td><td>{inputs['std_threshold']} standard deviations</td></tr>
                 <tr><td>Exit Threshold</td><td>Mean (0 standard deviations)</td></tr>
+                <tr><td>Stop-Loss Threshold</td><td>{f"{inputs['stop_loss_threshold']} standard deviations" if inputs.get('stop_loss_threshold', 0) > 0 else "Disabled"}</td></tr>
                 <tr><td>Initial Capital</td><td>${INITIAL_CAPITAL:,}</td></tr>
                 <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
                 <tr><td>Fee Model</td><td>IBKR Realistic (commission + SEC + FINRA + spread)</td></tr>
@@ -1661,7 +1789,10 @@ def run_backtest():
 
     # Calculate strategy
     print(f"Calculating strategy returns (lookback: {inputs['lookback_period']} days)...")
-    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis, inputs['lookback_period'], inputs['std_threshold'])
+    df_strategy = calculate_strategy_returns(
+        df, inputs['ticker1'], inputs['ticker2'], pair_analysis,
+        inputs['lookback_period'], inputs['std_threshold'], inputs['stop_loss_threshold']
+    )
 
     # Calculate metrics
     print("Calculating performance metrics...")
@@ -1679,7 +1810,7 @@ def run_backtest():
     print("Generating charts...")
     charts, final_value = create_charts(
         df, df_strategy, inputs['ticker1'], inputs['ticker2'],
-        pair_analysis, metrics, inputs['std_threshold']
+        pair_analysis, metrics, inputs['std_threshold'], inputs['stop_loss_threshold']
     )
 
     # Extract trade log for P&L analysis
