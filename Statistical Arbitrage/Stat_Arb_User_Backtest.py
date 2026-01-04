@@ -535,11 +535,40 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['returns_1'] = df[symbol1].pct_change()
     df_strategy['returns_2'] = df[symbol2].pct_change()
 
-    # Position sizing - calculate actual shares based on position size per leg
-    df_strategy['shares_1'] = (df_strategy['position'] * POSITION_SIZE_PER_LEG / df[symbol1]).round()
-    df_strategy['shares_2'] = (-df_strategy['position'] * hedge_ratio * POSITION_SIZE_PER_LEG / df[symbol2]).round()
+    # =========================================================================
+    # FIXED: Position sizing - shares are LOCKED at entry price, not recalculated daily
+    # =========================================================================
+    # When you enter a trade, you buy a fixed number of shares at the entry price.
+    # Those shares remain constant until you exit the position.
+    # This is how real trading works - you don't rebalance shares daily.
 
-    # Calculate position changes in shares
+    df_strategy['shares_1'] = 0.0
+    df_strategy['shares_2'] = 0.0
+
+    current_shares_1 = 0.0
+    current_shares_2 = 0.0
+
+    for i in range(len(df_strategy)):
+        current_pos = df_strategy['position'].iloc[i]
+        prev_pos = df_strategy['position'].iloc[i-1] if i > 0 else 0
+
+        # Position changed - either entry or exit
+        if current_pos != prev_pos:
+            if current_pos != 0:
+                # ENTRY: Calculate shares at entry price and lock them
+                entry_price_1 = df[symbol1].iloc[i]
+                entry_price_2 = df[symbol2].iloc[i]
+                current_shares_1 = round(current_pos * POSITION_SIZE_PER_LEG / entry_price_1)
+                current_shares_2 = round(-current_pos * hedge_ratio * POSITION_SIZE_PER_LEG / entry_price_2)
+            else:
+                # EXIT: Reset shares to 0
+                current_shares_1 = 0.0
+                current_shares_2 = 0.0
+
+        df_strategy.iloc[i, df_strategy.columns.get_loc('shares_1')] = current_shares_1
+        df_strategy.iloc[i, df_strategy.columns.get_loc('shares_2')] = current_shares_2
+
+    # Calculate position changes in shares (for fee calculation)
     df_strategy['shares_1_change'] = df_strategy['shares_1'].diff().fillna(0)
     df_strategy['shares_2_change'] = df_strategy['shares_2'].diff().fillna(0)
 
@@ -1177,6 +1206,16 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     # Determine if pair is suitable for pairs trading
     is_suitable = is_cointegrated and is_stationary and pair_analysis['correlation'] > 0.5
 
+    # Calculate TRADE-BASED win rate (not daily returns win rate)
+    if trade_log and len(trade_log) > 0:
+        winning_trades = len([t for t in trade_log if t['net_pnl'] > 0])
+        total_trades = len(trade_log)
+        trade_win_rate = winning_trades / total_trades
+    else:
+        trade_win_rate = 0
+        winning_trades = 0
+        total_trades = 0
+
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1413,8 +1452,8 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                     <div class="value {'positive' if final_value > INITIAL_CAPITAL else 'negative'}">${final_value:,.0f}</div>
                 </div>
                 <div class="summary-card">
-                    <div class="label">Win Rate</div>
-                    <div class="value">{metrics['win_rate']:.1%}</div>
+                    <div class="label">Trade Win Rate</div>
+                    <div class="value">{trade_win_rate:.1%} ({winning_trades}/{total_trades})</div>
                 </div>
                 <div class="summary-card">
                     <div class="label">Trading Days</div>
@@ -1486,7 +1525,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                     <h3 style="margin-bottom: 15px; color: #1a237e;">Risk Metrics</h3>
                     <table class="metrics-table">
                         <tr><td>Maximum Drawdown</td><td><strong style="color: #F44336;">{metrics['max_drawdown']:.2%}</strong></td></tr>
-                        <tr><td>Win Rate</td><td>{metrics['win_rate']:.1%}</td></tr>
+                        <tr><td>Trade Win Rate</td><td>{trade_win_rate:.1%} ({winning_trades}/{total_trades})</td></tr>
                         <tr><td>Profit Factor</td><td>{metrics['profit_factor']:.2f}</td></tr>
                         <tr><td>Average Win</td><td style="color: #4CAF50;">{metrics['avg_win']*100:.3f}%</td></tr>
                         <tr><td>Average Loss</td><td style="color: #F44336;">-{metrics['avg_loss']*100:.3f}%</td></tr>
