@@ -490,6 +490,117 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
 
     return df_strategy
 
+def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
+    """
+    Extract detailed P&L for each individual trade (round-trip).
+    Returns a list of trade dictionaries with entry/exit details and fees.
+    """
+    trades = []
+    position_changes = df_strategy['position'].diff().fillna(0)
+
+    # Track current trade
+    in_trade = False
+    trade_start_idx = None
+    trade_direction = 0  # 1 for long spread, -1 for short spread
+
+    for i in range(len(df_strategy)):
+        current_pos = df_strategy['position'].iloc[i]
+        pos_change = position_changes.iloc[i]
+
+        # Entry: position changes from 0 to non-zero
+        if not in_trade and pos_change != 0 and current_pos != 0:
+            in_trade = True
+            trade_start_idx = i
+            trade_direction = int(current_pos)
+
+        # Exit: position returns to 0
+        elif in_trade and current_pos == 0 and pos_change != 0:
+            trade_end_idx = i
+
+            # Extract trade details
+            entry_date = df_strategy.index[trade_start_idx]
+            exit_date = df_strategy.index[trade_end_idx]
+            holding_days = (exit_date - entry_date).days
+
+            # Prices at entry and exit
+            entry_price_1 = df[symbol1].iloc[trade_start_idx]
+            entry_price_2 = df[symbol2].iloc[trade_start_idx]
+            exit_price_1 = df[symbol1].iloc[trade_end_idx]
+            exit_price_2 = df[symbol2].iloc[trade_end_idx]
+
+            # Shares traded
+            shares_1 = abs(df_strategy['shares_1'].iloc[trade_start_idx])
+            shares_2 = abs(df_strategy['shares_2'].iloc[trade_start_idx])
+
+            # Calculate P&L for each leg
+            # For long spread (direction=1): Long symbol1, Short symbol2
+            # For short spread (direction=-1): Short symbol1, Long symbol2
+            if trade_direction == 1:
+                # Long spread: bought symbol1, sold symbol2
+                pnl_1 = shares_1 * (exit_price_1 - entry_price_1)  # Long position
+                pnl_2 = shares_2 * (entry_price_2 - exit_price_2)  # Short position
+            else:
+                # Short spread: sold symbol1, bought symbol2
+                pnl_1 = shares_1 * (entry_price_1 - exit_price_1)  # Short position
+                pnl_2 = shares_2 * (exit_price_2 - entry_price_2)  # Long position
+
+            gross_pnl = pnl_1 + pnl_2
+
+            # Sum fees for entry and exit
+            entry_fees = (
+                df_strategy['commission_1'].iloc[trade_start_idx] +
+                df_strategy['commission_2'].iloc[trade_start_idx] +
+                df_strategy['sec_fee'].iloc[trade_start_idx] +
+                df_strategy['finra_fee'].iloc[trade_start_idx] +
+                df_strategy['spread_cost'].iloc[trade_start_idx]
+            )
+            exit_fees = (
+                df_strategy['commission_1'].iloc[trade_end_idx] +
+                df_strategy['commission_2'].iloc[trade_end_idx] +
+                df_strategy['sec_fee'].iloc[trade_end_idx] +
+                df_strategy['finra_fee'].iloc[trade_end_idx] +
+                df_strategy['spread_cost'].iloc[trade_end_idx]
+            )
+            total_fees = entry_fees + exit_fees
+            net_pnl = gross_pnl - total_fees
+
+            # Z-score at entry and exit
+            entry_zscore = df_strategy['z_score'].iloc[trade_start_idx]
+            exit_zscore = df_strategy['z_score'].iloc[trade_end_idx]
+
+            # Capital deployed (approximate)
+            capital_used = shares_1 * entry_price_1 + shares_2 * entry_price_2
+            return_pct = (net_pnl / capital_used * 100) if capital_used > 0 else 0
+
+            trades.append({
+                'trade_num': len(trades) + 1,
+                'direction': 'Long Spread' if trade_direction == 1 else 'Short Spread',
+                'entry_date': entry_date.strftime('%Y-%m-%d'),
+                'exit_date': exit_date.strftime('%Y-%m-%d'),
+                'holding_days': holding_days,
+                'entry_zscore': entry_zscore,
+                'exit_zscore': exit_zscore,
+                'entry_price_1': entry_price_1,
+                'exit_price_1': exit_price_1,
+                'entry_price_2': entry_price_2,
+                'exit_price_2': exit_price_2,
+                'shares_1': shares_1,
+                'shares_2': shares_2,
+                'pnl_1': pnl_1,
+                'pnl_2': pnl_2,
+                'gross_pnl': gross_pnl,
+                'total_fees': total_fees,
+                'net_pnl': net_pnl,
+                'return_pct': return_pct,
+                'capital_used': capital_used
+            })
+
+            in_trade = False
+            trade_start_idx = None
+            trade_direction = 0
+
+    return trades
+
 def calculate_performance_metrics(returns_series):
     """Calculate comprehensive performance metrics"""
     returns_series = returns_series.fillna(0)
@@ -771,7 +882,117 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
 # HTML REPORT GENERATION
 # =============================================================================
 
-def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts, final_value):
+def generate_trade_log_html(trade_log, symbol1, symbol2):
+    """Generate HTML table for trade-by-trade P&L analysis"""
+    if not trade_log:
+        return '<p>No completed trades to display.</p>'
+
+    # Calculate summary stats
+    winning_trades = [t for t in trade_log if t['net_pnl'] > 0]
+    losing_trades = [t for t in trade_log if t['net_pnl'] <= 0]
+    total_gross_pnl = sum(t['gross_pnl'] for t in trade_log)
+    total_fees = sum(t['total_fees'] for t in trade_log)
+    total_net_pnl = sum(t['net_pnl'] for t in trade_log)
+    avg_holding = sum(t['holding_days'] for t in trade_log) / len(trade_log) if trade_log else 0
+
+    # Summary section
+    html = f'''
+    <div class="summary-grid" style="margin-bottom: 20px;">
+        <div class="summary-card {'positive' if len(winning_trades) > len(losing_trades) else 'negative'}">
+            <div class="label">Win/Loss</div>
+            <div class="value">{len(winning_trades)}/{len(losing_trades)}</div>
+        </div>
+        <div class="summary-card {'positive' if total_gross_pnl > 0 else 'negative'}">
+            <div class="label">Gross P&L</div>
+            <div class="value {'positive' if total_gross_pnl > 0 else 'negative'}">${total_gross_pnl:,.2f}</div>
+        </div>
+        <div class="summary-card negative">
+            <div class="label">Total Fees</div>
+            <div class="value negative">-${total_fees:,.2f}</div>
+        </div>
+        <div class="summary-card {'positive' if total_net_pnl > 0 else 'negative'}">
+            <div class="label">Net P&L</div>
+            <div class="value {'positive' if total_net_pnl > 0 else 'negative'}">${total_net_pnl:,.2f}</div>
+        </div>
+    </div>
+
+    <div style="overflow-x: auto;">
+    <table class="metrics-table" style="font-size: 0.85em;">
+        <thead>
+            <tr style="background: #1a237e; color: white;">
+                <th>#</th>
+                <th>Direction</th>
+                <th>Entry Date</th>
+                <th>Exit Date</th>
+                <th>Days</th>
+                <th>Entry Z</th>
+                <th>Exit Z</th>
+                <th>{symbol1} P&L</th>
+                <th>{symbol2} P&L</th>
+                <th>Gross P&L</th>
+                <th>Fees</th>
+                <th>Net P&L</th>
+                <th>Return %</th>
+            </tr>
+        </thead>
+        <tbody>
+    '''
+
+    for trade in trade_log:
+        pnl_color = '#4CAF50' if trade['net_pnl'] > 0 else '#F44336'
+        direction_icon = '📈' if trade['direction'] == 'Long Spread' else '📉'
+
+        html += f'''
+            <tr>
+                <td>{trade['trade_num']}</td>
+                <td>{direction_icon} {trade['direction']}</td>
+                <td>{trade['entry_date']}</td>
+                <td>{trade['exit_date']}</td>
+                <td>{trade['holding_days']}</td>
+                <td>{trade['entry_zscore']:.2f}</td>
+                <td>{trade['exit_zscore']:.2f}</td>
+                <td style="color: {'#4CAF50' if trade['pnl_1'] > 0 else '#F44336'};">${trade['pnl_1']:,.2f}</td>
+                <td style="color: {'#4CAF50' if trade['pnl_2'] > 0 else '#F44336'};">${trade['pnl_2']:,.2f}</td>
+                <td style="color: {'#4CAF50' if trade['gross_pnl'] > 0 else '#F44336'};">${trade['gross_pnl']:,.2f}</td>
+                <td style="color: #F44336;">-${trade['total_fees']:,.2f}</td>
+                <td style="color: {pnl_color}; font-weight: bold;">${trade['net_pnl']:,.2f}</td>
+                <td style="color: {pnl_color}; font-weight: bold;">{trade['return_pct']:.2f}%</td>
+            </tr>
+        '''
+
+    # Add totals row
+    html += f'''
+            <tr style="background: #f8f9fa; font-weight: bold; border-top: 2px solid #1a237e;">
+                <td colspan="7">TOTALS ({len(trade_log)} trades, avg {avg_holding:.1f} days)</td>
+                <td style="color: {'#4CAF50' if sum(t['pnl_1'] for t in trade_log) > 0 else '#F44336'};">
+                    ${sum(t['pnl_1'] for t in trade_log):,.2f}
+                </td>
+                <td style="color: {'#4CAF50' if sum(t['pnl_2'] for t in trade_log) > 0 else '#F44336'};">
+                    ${sum(t['pnl_2'] for t in trade_log):,.2f}
+                </td>
+                <td style="color: {'#4CAF50' if total_gross_pnl > 0 else '#F44336'};">${total_gross_pnl:,.2f}</td>
+                <td style="color: #F44336;">-${total_fees:,.2f}</td>
+                <td style="color: {'#4CAF50' if total_net_pnl > 0 else '#F44336'};">${total_net_pnl:,.2f}</td>
+                <td></td>
+            </tr>
+        </tbody>
+    </table>
+    </div>
+
+    <div class="info-box" style="margin-top: 20px;">
+        <strong>How to Read This Table:</strong><br>
+        <ul style="margin-top: 10px; margin-left: 20px;">
+            <li><strong>Long Spread:</strong> Bought {symbol1}, Sold {symbol2} (betting spread will increase)</li>
+            <li><strong>Short Spread:</strong> Sold {symbol1}, Bought {symbol2} (betting spread will decrease)</li>
+            <li><strong>Entry/Exit Z:</strong> Z-score at trade entry and exit (entry should be beyond threshold, exit near 0)</li>
+            <li><strong>Fees:</strong> IBKR commission + SEC fee + FINRA TAF + bid-ask spread</li>
+        </ul>
+    </div>
+    '''
+
+    return html
+
+def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts, final_value, trade_log=None):
     """Generate comprehensive HTML report"""
 
     symbol1 = inputs['ticker1']
@@ -1225,6 +1446,17 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
         </div>
 
         <div class="section">
+            <h2 class="section-title">Trade-by-Trade P&L Analysis</h2>
+
+            <p style="margin-bottom: 15px; color: #666;">
+                Detailed breakdown of each round-trip trade showing entry/exit prices, P&L per leg, fees, and net returns.
+                This helps identify which trades worked and why.
+            </p>
+
+            {generate_trade_log_html(trade_log, symbol1, symbol2) if trade_log else '<p>No completed trades to display.</p>'}
+        </div>
+
+        <div class="section">
             <h2 class="section-title">Charts & Visualizations</h2>
 
             <div class="chart-container">
@@ -1458,10 +1690,18 @@ def run_backtest():
         pair_analysis, metrics, inputs['std_threshold']
     )
 
+    # Extract trade log for P&L analysis
+    print("Extracting trade-by-trade P&L...")
+    trade_log = extract_trade_log(
+        df, df_strategy, inputs['ticker1'], inputs['ticker2'],
+        pair_analysis['hedge_ratio']
+    )
+    print(f"  - Found {len(trade_log)} completed round-trip trades")
+
     # Generate HTML report
     print("Generating HTML report...")
     html_content = generate_html_report(
-        inputs, df, df_strategy, pair_analysis, metrics, charts, final_value
+        inputs, df, df_strategy, pair_analysis, metrics, charts, final_value, trade_log
     )
 
     # Ensure reports folder exists and save report there
