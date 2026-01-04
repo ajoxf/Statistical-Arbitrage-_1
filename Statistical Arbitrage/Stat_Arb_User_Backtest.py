@@ -39,15 +39,29 @@ MIN_OBSERVATIONS = 100
 
 # =============================================================================
 # IBKR REALISTIC TRANSACTION COST STRUCTURE
+# Source: https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
 # =============================================================================
 
 IBKR_FEES = {
+    # IBKR Fixed Pricing Commission
     'commission_per_share': 0.005,    # $0.005 per share
     'min_commission': 1.00,           # $1.00 minimum per order
     'max_commission_pct': 0.01,       # 1% max of trade value
-    'sec_fee_rate': 0.0000278,        # SEC fee (sales only)
-    'finra_taf': 0.000166,            # FINRA TAF (sales only)
-    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps bid-ask spread cost
+
+    # SEC Section 31 Fee (sales only)
+    # Rate: $27.80 per million ($0.0000278 per dollar) through May 13, 2025
+    # Rate: $0.00 per million after May 14, 2025
+    # Source: https://www.sec.gov/rules-regulations/fee-rate-advisories/2025-2
+    'sec_fee_rate': 0.0000278,        # $27.80 per million for historical backtests
+
+    # FINRA Trading Activity Fee (TAF) - PER SHARE, not percentage!
+    # Rate: $0.000166 per share (max $8.30 per trade)
+    # Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
+    'finra_taf_per_share': 0.000166,  # $0.000166 per share for sales
+    'finra_taf_max': 8.30,            # Maximum $8.30 per trade
+
+    # Estimated bid-ask spread cost
+    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps (0.025%) per trade
 }
 
 # ETF symbols that are typically commission-free on IBKR
@@ -242,13 +256,30 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
         adf_pvalue = 1.0
         stationary = False
 
-    # Quality score (0-100)
-    quality_score = (
-        min(abs(correlation), 1.0) * 25 +
-        (1 - min(coint_pvalue, 1.0)) * 25 +
-        r_squared * 25 +
-        (1 - min(adf_pvalue, 1.0)) * 25
-    )
+    # Quality score (0-100) with proper weighting
+    # CRITICAL: Cointegration is essential for pairs trading - heavily penalize if not met
+    #
+    # Scoring breakdown:
+    # - Correlation: 15 points (helpful but not critical)
+    # - Cointegration: 35 points (CRITICAL - pairs MUST be cointegrated)
+    # - R-squared: 15 points (model fit quality)
+    # - Spread stationarity: 35 points (CRITICAL - spread MUST mean-revert)
+    #
+    # Additional penalty: If either cointegration or stationarity fails, cap score at 40
+    #
+    correlation_score = min(abs(correlation), 1.0) * 15
+    cointegration_score = (1 - min(coint_pvalue, 1.0)) * 35
+    rsquared_score = r_squared * 15
+    stationarity_score = (1 - min(adf_pvalue, 1.0)) * 35
+
+    raw_score = correlation_score + cointegration_score + rsquared_score + stationarity_score
+
+    # Apply penalty if critical conditions are not met
+    if not cointegrated or not stationary:
+        # Cap score at 40 if pair fails cointegration OR stationarity test
+        quality_score = min(raw_score, 40)
+    else:
+        quality_score = raw_score
 
     return {
         'correlation': correlation,
@@ -266,18 +297,22 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
 
 def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     """
-    Calculate realistic IBKR transaction costs
+    Calculate realistic IBKR transaction costs based on official rates.
 
-    Components:
+    Components (sources verified January 2025):
     - Commission: $0.005/share (min $1, max 1% of trade)
-    - SEC fee: 0.00278% (sells only)
-    - FINRA TAF: 0.0166% (sells only)
-    - Bid-ask spread: ~2.5 bps estimate
+      Source: https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
+    - SEC Section 31 Fee: $27.80 per million (sells only)
+      Source: https://www.sec.gov/rules-regulations/fee-rate-advisories/2025-2
+    - FINRA TAF: $0.000166 per SHARE, max $8.30 per trade (sells only)
+      Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
+    - Bid-ask spread: ~2.5 bps estimate (market impact)
     """
     if shares_traded == 0 or price == 0:
         return 0.0, {}
 
     trade_value = abs(shares_traded * price)
+    num_shares = abs(shares_traded)
     is_sell = shares_traded < 0
 
     # Commission (check if commission-free ETF)
@@ -285,18 +320,28 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
         commission = 0.0
         is_commission_free = True
     else:
+        # IBKR Fixed Pricing: $0.005/share, min $1, max 1% of trade value
         commission = max(
             IBKR_FEES['min_commission'],
-            min(abs(shares_traded) * IBKR_FEES['commission_per_share'],
+            min(num_shares * IBKR_FEES['commission_per_share'],
                 trade_value * IBKR_FEES['max_commission_pct'])
         )
         is_commission_free = False
 
-    # Regulatory fees (sells only)
+    # SEC Section 31 Fee: $27.80 per million = 0.00278% (sells only)
     sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
-    finra_fee = trade_value * IBKR_FEES['finra_taf'] if is_sell else 0
 
-    # Bid-ask spread cost (both buys and sells)
+    # FINRA TAF: $0.000166 PER SHARE with max $8.30 per trade (sells only)
+    # This is NOT a percentage - it's a flat per-share fee!
+    if is_sell:
+        finra_fee = min(
+            num_shares * IBKR_FEES['finra_taf_per_share'],
+            IBKR_FEES['finra_taf_max']
+        )
+    else:
+        finra_fee = 0
+
+    # Bid-ask spread cost (market impact, both buys and sells)
     spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
 
     total_cost = commission + sec_fee + finra_fee + spread_cost
@@ -487,6 +532,18 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     # Set style
     plt.style.use('seaborn-v0_8-whitegrid')
 
+    # Identify buy and sell signals for markers
+    position_changes = df_strategy['position'].diff().fillna(0)
+
+    # Long entries (position goes from 0 to 1 or -1 to 1)
+    long_entries = df_strategy[(position_changes > 0) & (df_strategy['position'] == 1)].index
+
+    # Short entries (position goes from 0 to -1 or 1 to -1)
+    short_entries = df_strategy[(position_changes < 0) & (df_strategy['position'] == -1)].index
+
+    # Exits (position returns to 0)
+    exits = df_strategy[(position_changes != 0) & (df_strategy['position'] == 0)].index
+
     # 1. Price Comparison Chart
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df.index, df[symbol1], label=symbol1, linewidth=2, color='#2196F3')
@@ -515,7 +572,7 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     ax.grid(True, alpha=0.3)
     charts['spread_bands'] = fig_to_base64(fig)
 
-    # 3. Portfolio Performance
+    # 3. Portfolio Performance with Trade Markers
     fig, ax = plt.subplots(figsize=(12, 5))
     portfolio_value = INITIAL_CAPITAL * (1 + df_strategy['strategy_returns']).cumprod()
     bh1_value = INITIAL_CAPITAL * (1 + df_strategy['returns_1']).cumprod()
@@ -525,25 +582,49 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     ax.plot(df_strategy.index, bh1_value, label=f'{symbol1} Buy & Hold', alpha=0.7, linewidth=1.5, color='#4CAF50')
     ax.plot(df_strategy.index, bh2_value, label=f'{symbol2} Buy & Hold', alpha=0.7, linewidth=1.5, color='#FF5722')
     ax.axhline(y=INITIAL_CAPITAL, color='gray', linestyle=':', alpha=0.7, label='Initial Capital')
+
+    # Add trade markers
+    if len(long_entries) > 0:
+        ax.scatter(long_entries, portfolio_value.loc[long_entries],
+                  marker='^', color='#4CAF50', s=100, zorder=5, label='Long Entry', edgecolors='black', linewidths=0.5)
+    if len(short_entries) > 0:
+        ax.scatter(short_entries, portfolio_value.loc[short_entries],
+                  marker='v', color='#F44336', s=100, zorder=5, label='Short Entry', edgecolors='black', linewidths=0.5)
+    if len(exits) > 0:
+        ax.scatter(exits, portfolio_value.loc[exits],
+                  marker='o', color='#FFC107', s=60, zorder=5, label='Exit', edgecolors='black', linewidths=0.5)
+
     ax.set_xlabel('Date', fontsize=12)
     ax.set_ylabel('Portfolio Value ($)', fontsize=12)
-    ax.set_title('Portfolio Performance Comparison', fontsize=14, fontweight='bold')
-    ax.legend(loc='upper left')
+    ax.set_title('Portfolio Performance with Trade Signals', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
     charts['portfolio_performance'] = fig_to_base64(fig)
 
-    # 4. Z-Score with Signals
+    # 4. Z-Score with Trade Markers
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df_strategy.index, df_strategy['z_score'], alpha=0.8, linewidth=1.5, color='#2196F3')
-    ax.axhline(y=1.5, color='#F44336', linestyle='--', linewidth=1.5, label='Short Entry (+1.5)')
-    ax.axhline(y=-1.5, color='#4CAF50', linestyle='--', linewidth=1.5, label='Long Entry (-1.5)')
+    ax.axhline(y=1.5, color='#F44336', linestyle='--', linewidth=1.5, label='Short Entry Zone (+1.5)')
+    ax.axhline(y=-1.5, color='#4CAF50', linestyle='--', linewidth=1.5, label='Long Entry Zone (-1.5)')
     ax.axhline(y=0, color='black', linestyle='-', linewidth=1, label='Exit (Mean)')
     ax.fill_between(df_strategy.index, -1.5, 1.5, alpha=0.1, color='gray')
+
+    # Add trade markers on z-score chart
+    if len(long_entries) > 0:
+        ax.scatter(long_entries, df_strategy.loc[long_entries, 'z_score'],
+                  marker='^', color='#4CAF50', s=100, zorder=5, label='Long Entry', edgecolors='black', linewidths=0.5)
+    if len(short_entries) > 0:
+        ax.scatter(short_entries, df_strategy.loc[short_entries, 'z_score'],
+                  marker='v', color='#F44336', s=100, zorder=5, label='Short Entry', edgecolors='black', linewidths=0.5)
+    if len(exits) > 0:
+        ax.scatter(exits, df_strategy.loc[exits, 'z_score'],
+                  marker='o', color='#FFC107', s=60, zorder=5, label='Exit', edgecolors='black', linewidths=0.5)
+
     ax.set_xlabel('Date', fontsize=12)
     ax.set_ylabel('Z-Score', fontsize=12)
-    ax.set_title('Z-Score with Entry/Exit Signals', fontsize=14, fontweight='bold')
-    ax.legend(loc='upper right')
+    ax.set_title('Z-Score with Trade Signals', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(-4, 4)
     charts['zscore'] = fig_to_base64(fig)
@@ -590,6 +671,71 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     ax.grid(True, alpha=0.3)
     charts['returns_dist'] = fig_to_base64(fig)
 
+    # 8. Monthly Returns Heat Map
+    try:
+        # Create monthly returns
+        df_monthly = df_strategy['strategy_returns'].copy()
+        df_monthly.index = pd.to_datetime(df_monthly.index)
+
+        # Group by year and month
+        monthly_returns = df_monthly.groupby([df_monthly.index.year, df_monthly.index.month]).apply(
+            lambda x: (1 + x).prod() - 1
+        )
+
+        # Create pivot table for heatmap
+        years = sorted(set([idx[0] for idx in monthly_returns.index]))
+        months = range(1, 13)
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+        # Build heatmap data
+        heatmap_data = np.full((len(years), 12), np.nan)
+        for idx, val in monthly_returns.items():
+            year_idx = years.index(idx[0])
+            month_idx = idx[1] - 1
+            heatmap_data[year_idx, month_idx] = val * 100  # Convert to percentage
+
+        fig, ax = plt.subplots(figsize=(12, max(3, len(years) * 0.5 + 1)))
+
+        # Create heatmap
+        cmap = sns.diverging_palette(10, 130, as_cmap=True)  # Red for negative, green for positive
+        im = ax.imshow(heatmap_data, cmap=cmap, aspect='auto', vmin=-10, vmax=10)
+
+        # Set ticks and labels
+        ax.set_xticks(np.arange(12))
+        ax.set_xticklabels(month_names, fontsize=10)
+        ax.set_yticks(np.arange(len(years)))
+        ax.set_yticklabels(years, fontsize=10)
+
+        # Add text annotations
+        for i in range(len(years)):
+            for j in range(12):
+                val = heatmap_data[i, j]
+                if not np.isnan(val):
+                    text_color = 'white' if abs(val) > 5 else 'black'
+                    ax.text(j, i, f'{val:.1f}%', ha='center', va='center',
+                           color=text_color, fontsize=9, fontweight='bold')
+
+        ax.set_title('Monthly Returns Heat Map (%)', fontsize=14, fontweight='bold', pad=15)
+        ax.set_xlabel('Month', fontsize=12)
+        ax.set_ylabel('Year', fontsize=12)
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+        cbar.set_label('Return (%)', fontsize=10)
+
+        plt.tight_layout()
+        charts['heatmap'] = fig_to_base64(fig)
+    except Exception as e:
+        # If heatmap fails, create a simple placeholder
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.text(0.5, 0.5, f'Heat map unavailable\n(insufficient data)',
+               ha='center', va='center', fontsize=14, color='gray')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+        charts['heatmap'] = fig_to_base64(fig)
+
     return charts, portfolio_value.iloc[-1]
 
 # =============================================================================
@@ -631,23 +777,30 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     gross_final_value = INITIAL_CAPITAL * (1 + gross_return)
     net_final_value = final_value
 
-    # Determine quality rating
+    # Determine quality rating based on updated scoring
+    # Note: Pairs that fail cointegration/stationarity are capped at 40
     quality_score = pair_analysis['quality_score']
-    if quality_score >= 80:
+    is_cointegrated = pair_analysis['cointegrated']
+    is_stationary = pair_analysis['stationary']
+
+    if quality_score >= 80 and is_cointegrated and is_stationary:
         quality_rating = "Excellent"
         quality_color = "#4CAF50"
-    elif quality_score >= 60:
+    elif quality_score >= 60 and is_cointegrated and is_stationary:
         quality_rating = "Good"
         quality_color = "#8BC34A"
-    elif quality_score >= 40:
+    elif quality_score >= 50 and is_cointegrated:
         quality_rating = "Fair"
         quality_color = "#FFC107"
-    else:
-        quality_rating = "Poor"
+    elif quality_score < 50 and (not is_cointegrated or not is_stationary):
+        quality_rating = "Poor - NOT COINTEGRATED"
         quality_color = "#F44336"
+    else:
+        quality_rating = "Marginal"
+        quality_color = "#FF9800"
 
-    # Determine if pair is suitable
-    is_suitable = pair_analysis['cointegrated'] and pair_analysis['correlation'] > 0.5
+    # Determine if pair is suitable for pairs trading
+    is_suitable = is_cointegrated and is_stationary and pair_analysis['correlation'] > 0.5
 
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -1019,7 +1172,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <tr>
                     <td>FINRA TAF</td>
                     <td>${total_finra_fees:,.2f}</td>
-                    <td>0.0166% on sales only</td>
+                    <td>$0.000166/share on sales (max $8.30/trade)</td>
                 </tr>
                 <tr>
                     <td>Bid-Ask Spread</td>
@@ -1078,6 +1231,11 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
             <div class="chart-container">
                 <div class="chart-title">Distribution of Daily Returns</div>
                 <img src="data:image/png;base64,{charts['returns_dist']}" alt="Returns Distribution">
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-title">Monthly Returns Heat Map</div>
+                <img src="data:image/png;base64,{charts['heatmap']}" alt="Monthly Returns Heat Map">
             </div>
         </div>
 
