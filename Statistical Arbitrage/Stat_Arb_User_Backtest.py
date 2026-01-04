@@ -156,6 +156,33 @@ def get_user_inputs():
         except ValueError:
             print("Please enter a valid number (or press Enter for default).")
 
+    # Get standard deviation threshold
+    print("\n" + "-"*60)
+    print("Z-SCORE ENTRY THRESHOLD (Standard Deviations)")
+    print("-"*60)
+    print("\nThis controls when to enter trades based on how far the spread")
+    print("deviates from its mean (measured in standard deviations).")
+    print("\n  Suggested values:")
+    print("    1.0 σ - More aggressive, more trades, higher risk")
+    print("    1.5 σ - Default, balanced approach")
+    print("    2.0 σ - Conservative, fewer trades, higher conviction")
+    print("    2.5 σ - Very conservative, rare but strong signals")
+    print("-"*60)
+
+    while True:
+        std_input = input(f"\nStandard deviation threshold [default: {DEFAULT_STD_DEV_THRESHOLD}]: ").strip()
+        if std_input == "":
+            std_threshold = DEFAULT_STD_DEV_THRESHOLD
+            break
+        try:
+            std_threshold = float(std_input)
+            if 0.5 <= std_threshold <= 4.0:
+                break
+            else:
+                print("Please enter a value between 0.5 and 4.0.")
+        except ValueError:
+            print("Please enter a valid number (or press Enter for default).")
+
     # Summary
     print("\n" + "="*60)
     print("BACKTEST CONFIGURATION:")
@@ -163,7 +190,7 @@ def get_user_inputs():
     print(f"  Pair: {ticker1} vs {ticker2}")
     print(f"  Period: {start_date} to {end_date}")
     print(f"  Lookback Period: {lookback_period} days")
-    print(f"  Entry Threshold: {DEFAULT_STD_DEV_THRESHOLD} standard deviations")
+    print(f"  Entry Threshold: {std_threshold} standard deviations")
     print(f"  Initial Capital: ${INITIAL_CAPITAL:,}")
     print("="*60)
 
@@ -177,7 +204,8 @@ def get_user_inputs():
         'ticker2': ticker2,
         'start_date': start_date,
         'end_date': end_date,
-        'lookback_period': lookback_period
+        'lookback_period': lookback_period,
+        'std_threshold': std_threshold
     }
 
 # =============================================================================
@@ -359,12 +387,12 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
 
     return cost_pct, breakdown
 
-def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None):
+def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None, std_threshold=None):
     """Calculate strategy returns with realistic IBKR transaction costs"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
     lookback = lookback_period if lookback_period else DEFAULT_LOOKBACK_PERIOD
-    std_threshold = DEFAULT_STD_DEV_THRESHOLD
+    std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
 
     # Calculate bands
     df_strategy = df.copy()
@@ -525,9 +553,10 @@ def fig_to_base64(fig):
     plt.close(fig)
     return image_base64
 
-def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
+def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std_threshold=None):
     """Create all charts and return as base64 encoded images"""
     charts = {}
+    std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
 
     # Set style
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -562,8 +591,8 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df_strategy.index, df_strategy['spread'], alpha=0.8, label='Spread', linewidth=1.5, color='#2196F3')
     ax.plot(df_strategy.index, df_strategy['ma'], color='black', label='Moving Average', linewidth=2)
-    ax.plot(df_strategy.index, df_strategy['upper_band'], color='#F44336', linestyle='--', label='Upper Band (+1.5σ)', linewidth=1.5)
-    ax.plot(df_strategy.index, df_strategy['lower_band'], color='#4CAF50', linestyle='--', label='Lower Band (-1.5σ)', linewidth=1.5)
+    ax.plot(df_strategy.index, df_strategy['upper_band'], color='#F44336', linestyle='--', label=f'Upper Band (+{std_threshold}σ)', linewidth=1.5)
+    ax.plot(df_strategy.index, df_strategy['lower_band'], color='#4CAF50', linestyle='--', label=f'Lower Band (-{std_threshold}σ)', linewidth=1.5)
     ax.fill_between(df_strategy.index, df_strategy['lower_band'], df_strategy['upper_band'], alpha=0.1, color='gray')
     ax.set_xlabel('Date', fontsize=12)
     ax.set_ylabel('Spread Value', fontsize=12)
@@ -605,10 +634,10 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics):
     # 4. Z-Score with Trade Markers
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df_strategy.index, df_strategy['z_score'], alpha=0.8, linewidth=1.5, color='#2196F3')
-    ax.axhline(y=1.5, color='#F44336', linestyle='--', linewidth=1.5, label='Short Entry Zone (+1.5)')
-    ax.axhline(y=-1.5, color='#4CAF50', linestyle='--', linewidth=1.5, label='Long Entry Zone (-1.5)')
+    ax.axhline(y=std_threshold, color='#F44336', linestyle='--', linewidth=1.5, label=f'Short Entry Zone (+{std_threshold}σ)')
+    ax.axhline(y=-std_threshold, color='#4CAF50', linestyle='--', linewidth=1.5, label=f'Long Entry Zone (-{std_threshold}σ)')
     ax.axhline(y=0, color='black', linestyle='-', linewidth=1, label='Exit (Mean)')
-    ax.fill_between(df_strategy.index, -1.5, 1.5, alpha=0.1, color='gray')
+    ax.fill_between(df_strategy.index, -std_threshold, std_threshold, alpha=0.1, color='gray')
 
     # Add trade markers on z-score chart
     if len(long_entries) > 0:
@@ -1246,7 +1275,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <strong>How the Pairs Trading Strategy Works:</strong>
                 <ol style="margin-top: 10px; margin-left: 20px;">
                     <li><strong>Calculate the Spread:</strong> The price difference between {symbol1} and {symbol2}, adjusted by the hedge ratio.</li>
-                    <li><strong>Identify Deviation:</strong> When the spread moves more than 1.5 standard deviations from its mean, a trading opportunity exists.</li>
+                    <li><strong>Identify Deviation:</strong> When the spread moves more than {inputs['std_threshold']} standard deviations from its mean, a trading opportunity exists.</li>
                     <li><strong>Enter Position:</strong> Go long the spread when it's too low (buy {symbol1}, sell {symbol2}), go short when it's too high.</li>
                     <li><strong>Exit Position:</strong> Close the trade when the spread returns to its mean.</li>
                 </ol>
@@ -1255,7 +1284,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
             <h3 style="margin: 20px 0 15px; color: #1a237e;">Strategy Parameters Used</h3>
             <table class="metrics-table">
                 <tr><td>Lookback Period</td><td>{inputs['lookback_period']} days</td></tr>
-                <tr><td>Entry Threshold</td><td>{DEFAULT_STD_DEV_THRESHOLD} standard deviations</td></tr>
+                <tr><td>Entry Threshold</td><td>{inputs['std_threshold']} standard deviations</td></tr>
                 <tr><td>Exit Threshold</td><td>Mean (0 standard deviations)</td></tr>
                 <tr><td>Initial Capital</td><td>${INITIAL_CAPITAL:,}</td></tr>
                 <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
@@ -1408,7 +1437,7 @@ def run_backtest():
 
     # Calculate strategy
     print(f"Calculating strategy returns (lookback: {inputs['lookback_period']} days)...")
-    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis, inputs['lookback_period'])
+    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis, inputs['lookback_period'], inputs['std_threshold'])
 
     # Calculate metrics
     print("Calculating performance metrics...")
@@ -1426,7 +1455,7 @@ def run_backtest():
     print("Generating charts...")
     charts, final_value = create_charts(
         df, df_strategy, inputs['ticker1'], inputs['ticker2'],
-        pair_analysis, metrics
+        pair_analysis, metrics, inputs['std_threshold']
     )
 
     # Generate HTML report
