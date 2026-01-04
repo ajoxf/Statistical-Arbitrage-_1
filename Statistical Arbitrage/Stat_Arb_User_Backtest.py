@@ -470,22 +470,42 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
             df_strategy.iloc[i, df_strategy.columns.get_loc('finra_fee')] += breakdown.get('finra_fee', 0)
             df_strategy.iloc[i, df_strategy.columns.get_loc('spread_cost')] += breakdown.get('spread_cost', 0)
 
-    # Total transaction costs as percentage
-    df_strategy['transaction_costs'] = df_strategy['cost_1'] + df_strategy['cost_2']
-
-    # Position weights for return calculation
-    df_strategy['pos_1'] = df_strategy['position']
-    df_strategy['pos_2'] = -df_strategy['position'] * hedge_ratio
-
-    # Strategy returns before transaction costs
-    df_strategy['strategy_returns_gross'] = (
-        df_strategy['pos_1'].shift(1) * df_strategy['returns_1'] +
-        df_strategy['pos_2'].shift(1) * df_strategy['returns_2']
+    # Total transaction costs in DOLLARS (not percentage)
+    df_strategy['transaction_costs_dollars'] = (
+        df_strategy['commission_1'] + df_strategy['commission_2'] +
+        df_strategy['sec_fee'] + df_strategy['finra_fee'] + df_strategy['spread_cost']
     )
 
-    # Net returns after IBKR transaction costs
+    # =========================================================================
+    # CORRECT RETURN CALCULATION - Based on actual dollar P&L
+    # =========================================================================
+    # Daily dollar P&L for each leg:
+    # P&L = shares_held_yesterday * price_yesterday * daily_return
+    # This gives the actual dollar gain/loss for each position
+
+    # Price values from previous day (when position was established)
+    price_1_prev = df[symbol1].shift(1)
+    price_2_prev = df[symbol2].shift(1)
+
+    # Shares held from previous day
+    shares_1_prev = df_strategy['shares_1'].shift(1).fillna(0)
+    shares_2_prev = df_strategy['shares_2'].shift(1).fillna(0)
+
+    # Daily dollar P&L for each leg
+    # For long positions (shares > 0): gain when price goes up
+    # For short positions (shares < 0): gain when price goes down
+    df_strategy['daily_pnl_1'] = shares_1_prev * price_1_prev * df_strategy['returns_1']
+    df_strategy['daily_pnl_2'] = shares_2_prev * price_2_prev * df_strategy['returns_2']
+
+    # Total daily dollar P&L (before transaction costs)
+    df_strategy['daily_pnl_gross'] = df_strategy['daily_pnl_1'] + df_strategy['daily_pnl_2']
+
+    # Strategy returns as percentage of INITIAL CAPITAL
+    df_strategy['strategy_returns_gross'] = df_strategy['daily_pnl_gross'] / INITIAL_CAPITAL
+
+    # Net returns after IBKR transaction costs (costs also as % of capital)
     df_strategy['strategy_returns'] = (
-        df_strategy['strategy_returns_gross'] - df_strategy['transaction_costs']
+        df_strategy['strategy_returns_gross'] - (df_strategy['transaction_costs_dollars'] / INITIAL_CAPITAL)
     )
 
     return df_strategy
@@ -1004,10 +1024,6 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     exits = ((position_changes != 0) & (df_strategy['position'] == 0)).sum()
     num_round_trips = min(entries, exits)  # Complete round-trip trades
 
-    # Calculate total transaction costs (percentage)
-    total_transaction_costs = df_strategy['transaction_costs'].sum()
-    total_transaction_costs_dollars = total_transaction_costs * INITIAL_CAPITAL
-
     # Calculate IBKR fee breakdown in dollars
     total_commissions = df_strategy['commission_1'].sum() + df_strategy['commission_2'].sum()
     total_sec_fees = df_strategy['sec_fee'].sum()
@@ -1027,27 +1043,9 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     gross_final_value = INITIAL_CAPITAL * (1 + gross_return)
     net_final_value = final_value
 
-    # Determine quality rating based on updated scoring
-    # Note: Pairs that fail cointegration/stationarity are capped at 40
-    quality_score = pair_analysis['quality_score']
+    # Check cointegration status for suitability warning
     is_cointegrated = pair_analysis['cointegrated']
     is_stationary = pair_analysis['stationary']
-
-    if quality_score >= 80 and is_cointegrated and is_stationary:
-        quality_rating = "Excellent"
-        quality_color = "#4CAF50"
-    elif quality_score >= 60 and is_cointegrated and is_stationary:
-        quality_rating = "Good"
-        quality_color = "#8BC34A"
-    elif quality_score >= 50 and is_cointegrated:
-        quality_rating = "Fair"
-        quality_color = "#FFC107"
-    elif quality_score < 50 and (not is_cointegrated or not is_stationary):
-        quality_rating = "Poor - NOT COINTEGRATED"
-        quality_color = "#F44336"
-    else:
-        quality_rating = "Marginal"
-        quality_color = "#FF9800"
 
     # Determine if pair is suitable for pairs trading
     is_suitable = is_cointegrated and is_stationary and pair_analysis['correlation'] > 0.5
@@ -1301,13 +1299,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
         </div>
 
         <div class="section">
-            <h2 class="section-title">Pair Quality Analysis</h2>
-
-            <div style="text-align: center; margin-bottom: 20px;">
-                <span class="quality-badge" style="background-color: {quality_color};">
-                    Quality Score: {quality_score:.0f}/100 - {quality_rating}
-                </span>
-            </div>
+            <h2 class="section-title">Pair Statistical Analysis</h2>
 
             <table class="metrics-table">
                 <tr>
@@ -1665,7 +1657,7 @@ def run_backtest():
 
     print(f"  - Correlation: {pair_analysis['correlation']:.4f}")
     print(f"  - Cointegration p-value: {pair_analysis['cointegration_pvalue']:.4f}")
-    print(f"  - Quality Score: {pair_analysis['quality_score']:.1f}/100")
+    print(f"  - Cointegrated: {'Yes' if pair_analysis['cointegrated'] else 'No'}")
 
     # Calculate strategy
     print(f"Calculating strategy returns (lookback: {inputs['lookback_period']} days)...")
