@@ -763,16 +763,24 @@ def calculate_performance_metrics(returns_series):
     if len(returns_series) == 0 or returns_series.std() == 0:
         return None
 
-    total_return = (1 + returns_series).prod() - 1
+    # =========================================================================
+    # FIXED: Use SIMPLE SUM for total return, not compound product
+    # =========================================================================
+    # Since daily returns are calculated as daily_pnl / INITIAL_CAPITAL,
+    # they represent percentage of initial capital, not current portfolio.
+    # Therefore, total return = sum of daily returns (not compound product).
+    # This ensures P&L and returns are consistent.
+    total_return = returns_series.sum()
+
     num_years = len(returns_series) / 252
-    annual_return = (1 + total_return) ** (1 / num_years) - 1 if num_years > 0 else 0
+    annual_return = total_return / num_years if num_years > 0 else 0
     volatility = returns_series.std() * np.sqrt(252)
     sharpe_ratio = annual_return / volatility if volatility > 0 else 0
 
-    # Drawdown
-    cumulative = (1 + returns_series).cumprod()
+    # Drawdown - use cumulative sum (not product) for consistency
+    cumulative = returns_series.cumsum()
     peak = cumulative.expanding().max()
-    drawdown = (cumulative - peak) / peak
+    drawdown = cumulative - peak  # Already in percentage terms
     max_drawdown = drawdown.min()
 
     # Other metrics
@@ -871,7 +879,8 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
 
     # 3. Portfolio Performance with Trade Markers
     fig, ax = plt.subplots(figsize=(12, 5))
-    portfolio_value = INITIAL_CAPITAL * (1 + df_strategy['strategy_returns']).cumprod()
+    # Use cumulative SUM (not product) since returns are % of initial capital
+    portfolio_value = INITIAL_CAPITAL * (1 + df_strategy['strategy_returns'].cumsum())
     bh1_value = INITIAL_CAPITAL * (1 + df_strategy['returns_1']).cumprod()
     bh2_value = INITIAL_CAPITAL * (1 + df_strategy['returns_2']).cumprod()
 
@@ -960,9 +969,10 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
 
     # 6. Drawdown
     fig, ax = plt.subplots(figsize=(12, 4))
-    cumulative = (1 + df_strategy['strategy_returns']).cumprod()
-    peak = cumulative.expanding().max()
-    drawdown = ((cumulative - peak) / peak) * 100
+    # Use cumulative SUM since returns are % of initial capital
+    cumulative_return = df_strategy['strategy_returns'].cumsum()
+    peak = cumulative_return.expanding().max()
+    drawdown = (cumulative_return - peak) * 100  # Already in percentage terms
     ax.fill_between(df_strategy.index, drawdown, 0, alpha=0.5, color='#F44336')
     ax.plot(df_strategy.index, drawdown, linewidth=1, color='#B71C1C')
     ax.set_xlabel('Date', fontsize=12)
@@ -991,9 +1001,9 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
         df_monthly = df_strategy['strategy_returns'].copy()
         df_monthly.index = pd.to_datetime(df_monthly.index)
 
-        # Group by year and month
+        # Group by year and month - use SUM since returns are % of initial capital
         monthly_returns = df_monthly.groupby([df_monthly.index.year, df_monthly.index.month]).apply(
-            lambda x: (1 + x).prod() - 1
+            lambda x: x.sum()
         )
 
         # Create pivot table for heatmap
@@ -1192,7 +1202,8 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     symbol2_commission_free = symbol2.upper() in COMMISSION_FREE_ETFS
 
     # Calculate gross vs net returns
-    gross_return = (1 + df_strategy['strategy_returns_gross'].fillna(0)).prod() - 1
+    # Use SUM (not product) since returns are % of initial capital
+    gross_return = df_strategy['strategy_returns_gross'].fillna(0).sum()
     net_return = metrics['total_return']
 
     # Final values
