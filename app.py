@@ -519,6 +519,228 @@ def calculate_performance_metrics(returns_series):
 
 
 # =============================================================================
+# HTML REPORT GENERATION
+# =============================================================================
+
+def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period,
+                         std_threshold, stop_loss_threshold, df, df_strategy,
+                         pair_analysis, metrics, trade_log, final_value, total_fees):
+    """Generate a comprehensive HTML report for download"""
+
+    # Calculate additional metrics
+    gross_return = df_strategy['strategy_returns_gross'].fillna(0).sum()
+    winning_trades = len([t for t in trade_log if t['net_pnl'] > 0 and not t['is_open']])
+    total_completed = len([t for t in trade_log if not t['is_open']])
+    trade_win_rate = winning_trades / total_completed if total_completed > 0 else 0
+
+    # Trade log HTML
+    trade_rows = ""
+    for t in trade_log:
+        pnl_color = '#4CAF50' if t['net_pnl'] > 0 else '#F44336'
+        direction_icon = '&#x1F4C8;' if t['direction'] == 'Long Spread' else '&#x1F4C9;'
+        stop_marker = ' &#x1F6D1;' if t.get('is_stop_loss', False) else ''
+        open_marker = ' &#x23F3;' if t.get('is_open', False) else ''
+        exit_display = f"<span style='color: #FF9800;'>{t['exit_date']}</span>" if t.get('is_open') else t['exit_date']
+
+        trade_rows += f"""
+        <tr>
+            <td>{t['trade_num']}</td>
+            <td>{direction_icon} {t['direction']}{stop_marker}{open_marker}</td>
+            <td>{t['entry_date']}</td>
+            <td>{exit_display}</td>
+            <td>{t['holding_days']}</td>
+            <td>{t['entry_zscore']:.2f}</td>
+            <td>{t['exit_zscore']:.2f}</td>
+            <td style="color: {'#4CAF50' if t['gross_pnl'] > 0 else '#F44336'};">${t['gross_pnl']:,.2f}</td>
+            <td style="color: #F44336;">-${t['total_fees']:,.2f}</td>
+            <td style="color: {pnl_color}; font-weight: bold;">${t['net_pnl']:,.2f}</td>
+            <td style="color: {pnl_color};">{t['return_pct']:.2f}%</td>
+        </tr>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pairs Trading Backtest Report: {symbol1} vs {symbol2}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; background: #f5f5f5; padding: 20px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #1a237e 0%, #3949ab 100%); color: white; padding: 30px; text-align: center; }}
+        .header h1 {{ font-size: 2.5em; margin-bottom: 10px; }}
+        .section {{ padding: 30px; border-bottom: 1px solid #eee; }}
+        .section-title {{ font-size: 1.5em; color: #1a237e; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #3949ab; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px; }}
+        .summary-card {{ background: #f8f9fa; border-radius: 8px; padding: 20px; text-align: center; border-left: 4px solid #3949ab; }}
+        .summary-card.positive {{ border-left-color: #4CAF50; }}
+        .summary-card.negative {{ border-left-color: #F44336; }}
+        .summary-card .label {{ font-size: 0.9em; color: #666; margin-bottom: 5px; }}
+        .summary-card .value {{ font-size: 1.8em; font-weight: bold; color: #1a237e; }}
+        .summary-card .value.positive {{ color: #4CAF50; }}
+        .summary-card .value.negative {{ color: #F44336; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th, td {{ padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }}
+        th {{ background: #f8f9fa; font-weight: 600; color: #1a237e; }}
+        tr:hover {{ background: #f8f9fa; }}
+        .info-box {{ background: #E3F2FD; border-left: 4px solid #2196F3; padding: 15px 20px; margin: 20px 0; border-radius: 0 8px 8px 0; }}
+        .warning-box {{ background: #FFF3E0; border-left: 4px solid #FF9800; padding: 15px 20px; margin: 20px 0; border-radius: 0 8px 8px 0; }}
+        .success-box {{ background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 15px 20px; margin: 20px 0; border-radius: 0 8px 8px 0; }}
+        .two-column {{ display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }}
+        @media (max-width: 768px) {{ .two-column {{ grid-template-columns: 1fr; }} }}
+        @media print {{ body {{ background: white; padding: 0; }} .container {{ box-shadow: none; }} }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Pairs Trading Backtest Report</h1>
+            <div style="font-size: 1.2em; opacity: 0.9;">{symbol1} vs {symbol2}</div>
+            <div style="margin-top: 15px; font-size: 0.9em; opacity: 0.8;">
+                Backtest Period: {start_date} to {end_date}<br>
+                Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Executive Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-card {'positive' if metrics['total_return'] > 0 else 'negative'}">
+                    <div class="label">Total Return</div>
+                    <div class="value {'positive' if metrics['total_return'] > 0 else 'negative'}">{metrics['total_return']:.1%}</div>
+                </div>
+                <div class="summary-card {'positive' if metrics['annual_return'] > 0 else 'negative'}">
+                    <div class="label">Annual Return</div>
+                    <div class="value {'positive' if metrics['annual_return'] > 0 else 'negative'}">{metrics['annual_return']:.1%}</div>
+                </div>
+                <div class="summary-card {'positive' if metrics['sharpe_ratio'] > 1 else ''}">
+                    <div class="label">Sharpe Ratio</div>
+                    <div class="value">{metrics['sharpe_ratio']:.2f}</div>
+                </div>
+                <div class="summary-card negative">
+                    <div class="label">Max Drawdown</div>
+                    <div class="value negative">{metrics['max_drawdown']:.1%}</div>
+                </div>
+            </div>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <div class="label">Initial Capital</div>
+                    <div class="value">${INITIAL_CAPITAL:,.0f}</div>
+                </div>
+                <div class="summary-card {'positive' if final_value > INITIAL_CAPITAL else 'negative'}">
+                    <div class="label">Final Value</div>
+                    <div class="value {'positive' if final_value > INITIAL_CAPITAL else 'negative'}">${final_value:,.0f}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Trade Win Rate</div>
+                    <div class="value">{trade_win_rate:.1%} ({winning_trades}/{total_completed})</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Trading Days</div>
+                    <div class="value">{len(df):,}</div>
+                </div>
+            </div>
+            {'<div class="success-box"><strong>Good News!</strong> This pair shows statistical properties suitable for pairs trading.</div>' if pair_analysis['cointegrated'] and pair_analysis['stationary'] else '<div class="warning-box"><strong>Caution:</strong> This pair may not be ideal for pairs trading. Consider testing other pairs.</div>'}
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Strategy Parameters</h2>
+            <table>
+                <tr><th>Parameter</th><th>Value</th></tr>
+                <tr><td>Lookback Period</td><td>{lookback_period} days</td></tr>
+                <tr><td>Entry Threshold</td><td>{std_threshold} standard deviations</td></tr>
+                <tr><td>Stop-Loss</td><td>{'Disabled' if stop_loss_threshold == 0 else f'{stop_loss_threshold} standard deviations'}</td></tr>
+                <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Pair Statistical Analysis</h2>
+            <table>
+                <tr><th>Metric</th><th>Value</th><th>Interpretation</th></tr>
+                <tr><td>Correlation</td><td>{pair_analysis['correlation']:.4f}</td><td>{'Strong' if abs(pair_analysis['correlation']) > 0.7 else 'Moderate' if abs(pair_analysis['correlation']) > 0.5 else 'Weak'} correlation</td></tr>
+                <tr><td>Cointegration p-value</td><td>{pair_analysis['cointegration_pvalue']:.4f}</td><td>{'Cointegrated (Good)' if pair_analysis['cointegrated'] else 'Not Cointegrated (Caution)'}</td></tr>
+                <tr><td>Hedge Ratio</td><td>{pair_analysis['hedge_ratio']:.4f}</td><td>For every 1 unit of {symbol1}, trade {abs(pair_analysis['hedge_ratio']):.2f} units of {symbol2}</td></tr>
+                <tr><td>R-Squared</td><td>{pair_analysis['r_squared']:.4f}</td><td>{pair_analysis['r_squared']*100:.1f}% of variance explained</td></tr>
+                <tr><td>Spread Stationarity (ADF p-value)</td><td>{pair_analysis['adf_pvalue']:.4f}</td><td>{'Stationary (Mean-Reverting)' if pair_analysis['stationary'] else 'Non-Stationary (Caution)'}</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Performance Metrics</h2>
+            <div class="two-column">
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Return Metrics</h3>
+                    <table>
+                        <tr><td>Total Return (Net)</td><td><strong>{metrics['total_return']:.2%}</strong></td></tr>
+                        <tr><td>Gross Return (Before Fees)</td><td>{gross_return:.2%}</td></tr>
+                        <tr><td>Annual Return</td><td>{metrics['annual_return']:.2%}</td></tr>
+                        <tr><td>Volatility (Annual)</td><td>{metrics['volatility']:.2%}</td></tr>
+                        <tr><td>Sharpe Ratio</td><td><strong>{metrics['sharpe_ratio']:.2f}</strong></td></tr>
+                        <tr><td>Calmar Ratio</td><td>{metrics['calmar_ratio']:.2f}</td></tr>
+                    </table>
+                </div>
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Risk Metrics</h3>
+                    <table>
+                        <tr><td>Maximum Drawdown</td><td><strong style="color: #F44336;">{metrics['max_drawdown']:.2%}</strong></td></tr>
+                        <tr><td>Trade Win Rate</td><td>{trade_win_rate:.1%} ({winning_trades}/{total_completed})</td></tr>
+                        <tr><td>Profit Factor</td><td>{metrics['profit_factor']:.2f}</td></tr>
+                        <tr><td>Average Win</td><td style="color: #4CAF50;">{metrics['avg_win']*100:.3f}%</td></tr>
+                        <tr><td>Average Loss</td><td style="color: #F44336;">-{metrics['avg_loss']*100:.3f}%</td></tr>
+                        <tr><td>Fee Drag</td><td style="color: #F44336;">{(gross_return - metrics['total_return']):.2%}</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">IBKR Fee Breakdown</h2>
+            <table>
+                <tr><th>Fee Type</th><th>Amount</th></tr>
+                <tr><td>Commissions</td><td>${df_strategy['commission_1'].sum() + df_strategy['commission_2'].sum():,.2f}</td></tr>
+                <tr><td>SEC Fee</td><td>${df_strategy['sec_fee'].sum():,.2f}</td></tr>
+                <tr><td>FINRA TAF</td><td>${df_strategy['finra_fee'].sum():,.2f}</td></tr>
+                <tr><td>Bid-Ask Spread</td><td>${df_strategy['spread_cost'].sum():,.2f}</td></tr>
+                <tr style="font-weight: bold; background: #f8f9fa;"><td>Total Fees</td><td style="color: #F44336;">${total_fees:,.2f}</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">Trade Log</h2>
+            <div style="overflow-x: auto;">
+                <table style="font-size: 0.9em;">
+                    <thead>
+                        <tr style="background: #1a237e; color: white;">
+                            <th>#</th><th>Direction</th><th>Entry</th><th>Exit</th><th>Days</th>
+                            <th>Entry Z</th><th>Exit Z</th><th>Gross P&L</th><th>Fees</th><th>Net P&L</th><th>Return</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {trade_rows}
+                    </tbody>
+                </table>
+            </div>
+            <div class="info-box" style="margin-top: 20px;">
+                <strong>Legend:</strong><br>
+                &#x1F4C8; Long Spread: Bought {symbol1}, Sold {symbol2}<br>
+                &#x1F4C9; Short Spread: Sold {symbol1}, Bought {symbol2}<br>
+                &#x1F6D1; Stop-Loss Exit | &#x23F3; Open Position (unrealized P&L)
+            </div>
+        </div>
+
+        <div style="background: #f8f9fa; padding: 20px 30px; text-align: center; color: #666; font-size: 0.9em;">
+            Generated by Pairs Trading Backtester | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        </div>
+    </div>
+</body>
+</html>"""
+
+    return html
+
+
+# =============================================================================
 # STREAMLIT UI
 # =============================================================================
 
@@ -881,6 +1103,146 @@ def main():
             st.metric("FINRA TAF", f"${total_finra:,.2f}")
         with col4:
             st.metric("Bid-Ask Spread", f"${total_spread:,.2f}")
+
+        # Detailed Performance Metrics
+        st.markdown("---")
+        st.subheader("Detailed Performance Metrics")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Return Metrics**")
+            gross_return = df_strategy['strategy_returns_gross'].fillna(0).sum()
+            return_data = {
+                "Metric": ["Total Return (Net)", "Gross Return (Before Fees)", "Annual Return", "Volatility (Annual)", "Sharpe Ratio", "Calmar Ratio"],
+                "Value": [
+                    f"{metrics['total_return']:.2%}",
+                    f"{gross_return:.2%}",
+                    f"{metrics['annual_return']:.2%}",
+                    f"{metrics['volatility']:.2%}",
+                    f"{metrics['sharpe_ratio']:.2f}",
+                    f"{metrics['calmar_ratio']:.2f}"
+                ]
+            }
+            st.dataframe(pd.DataFrame(return_data), use_container_width=True, hide_index=True)
+
+        with col2:
+            st.markdown("**Risk Metrics**")
+            winning_trades = len([t for t in trade_log if t['net_pnl'] > 0 and not t['is_open']])
+            total_completed = len([t for t in trade_log if not t['is_open']])
+            win_rate = winning_trades / total_completed if total_completed > 0 else 0
+            risk_data = {
+                "Metric": ["Maximum Drawdown", "Trade Win Rate", "Profit Factor", "Average Win", "Average Loss", "Fee Drag on Returns"],
+                "Value": [
+                    f"{metrics['max_drawdown']:.2%}",
+                    f"{win_rate:.1%} ({winning_trades}/{total_completed})",
+                    f"{metrics['profit_factor']:.2f}",
+                    f"{metrics['avg_win']*100:.3f}%",
+                    f"-{metrics['avg_loss']*100:.3f}%",
+                    f"{(gross_return - metrics['total_return']):.2%}"
+                ]
+            }
+            st.dataframe(pd.DataFrame(risk_data), use_container_width=True, hide_index=True)
+
+        # Detailed Pair Statistics
+        st.markdown("---")
+        st.subheader("Detailed Pair Statistics")
+
+        pair_stats = {
+            "Metric": ["Correlation", "Cointegration p-value", "Cointegrated?", "Hedge Ratio", "R-Squared", "Spread Stationarity (ADF p-value)", "Stationary?"],
+            "Value": [
+                f"{pair_analysis['correlation']:.4f}",
+                f"{pair_analysis['cointegration_pvalue']:.4f}",
+                "Yes (Good)" if pair_analysis['cointegrated'] else "No (Caution)",
+                f"{pair_analysis['hedge_ratio']:.4f}",
+                f"{pair_analysis['r_squared']:.4f}",
+                f"{pair_analysis['adf_pvalue']:.4f}",
+                "Yes (Mean-Reverting)" if pair_analysis['stationary'] else "No (Caution)"
+            ],
+            "Interpretation": [
+                "Strong" if abs(pair_analysis['correlation']) > 0.7 else "Moderate" if abs(pair_analysis['correlation']) > 0.5 else "Weak",
+                "Cointegrated" if pair_analysis['cointegrated'] else "Not Cointegrated",
+                "Suitable for pairs trading" if pair_analysis['cointegrated'] else "May not be suitable",
+                f"For every 1 unit of {symbol1}, trade {abs(pair_analysis['hedge_ratio']):.2f} units of {symbol2}",
+                f"{pair_analysis['r_squared']*100:.1f}% of variance explained",
+                "Stationary" if pair_analysis['stationary'] else "Non-Stationary",
+                "Spread tends to revert to mean" if pair_analysis['stationary'] else "Spread may drift"
+            ]
+        }
+        st.dataframe(pd.DataFrame(pair_stats), use_container_width=True, hide_index=True)
+
+        # Additional Charts
+        st.markdown("---")
+        st.subheader("Additional Charts")
+
+        # Spread with Bollinger Bands
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(df_strategy.index, df_strategy['spread'], alpha=0.8, label='Spread', linewidth=1.5, color='#2196F3')
+        ax.plot(df_strategy.index, df_strategy['ma'], color='black', label='Moving Average', linewidth=2)
+        ax.plot(df_strategy.index, df_strategy['upper_band'], color='#F44336', linestyle='--', label=f'Upper Band (+{std_threshold}σ)', linewidth=1.5)
+        ax.plot(df_strategy.index, df_strategy['lower_band'], color='#4CAF50', linestyle='--', label=f'Lower Band (-{std_threshold}σ)', linewidth=1.5)
+        ax.fill_between(df_strategy.index, df_strategy['lower_band'], df_strategy['upper_band'], alpha=0.1, color='gray')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Spread Value')
+        ax.set_title('Spread with Bollinger Bands')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
+        plt.close()
+
+        # Drawdown Chart
+        fig, ax = plt.subplots(figsize=(12, 4))
+        cumulative_return = df_strategy['strategy_returns'].cumsum()
+        peak = cumulative_return.expanding().max()
+        drawdown = (cumulative_return - peak) * 100
+        ax.fill_between(df_strategy.index, drawdown, 0, alpha=0.5, color='#F44336')
+        ax.plot(df_strategy.index, drawdown, linewidth=1, color='#B71C1C')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Drawdown (%)')
+        ax.set_title('Strategy Drawdown')
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
+        plt.close()
+
+        # Position Over Time
+        fig, ax = plt.subplots(figsize=(12, 3))
+        ax.fill_between(df_strategy.index, df_strategy['position'], 0,
+                        where=(df_strategy['position'] > 0), alpha=0.5, color='#4CAF50', label='Long')
+        ax.fill_between(df_strategy.index, df_strategy['position'], 0,
+                        where=(df_strategy['position'] < 0), alpha=0.5, color='#F44336', label='Short')
+        ax.plot(df_strategy.index, df_strategy['position'], linewidth=0.5, color='black')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Position')
+        ax.set_title('Position Over Time')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-1.5, 1.5)
+        st.pyplot(fig)
+        plt.close()
+
+        # Download Report Section
+        st.markdown("---")
+        st.subheader("Download Report")
+
+        # Generate HTML Report
+        html_report = generate_html_report(
+            symbol1, symbol2, str(start_date), str(end_date),
+            lookback_period, std_threshold, stop_loss_threshold,
+            df, df_strategy, pair_analysis, metrics, trade_log,
+            final_value, total_fees
+        )
+
+        report_filename = f"Backtest_Report_{symbol1}_{symbol2}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+
+        st.download_button(
+            label="Download Full HTML Report",
+            data=html_report,
+            file_name=report_filename,
+            mime="text/html",
+            use_container_width=True
+        )
+
+        st.info("The HTML report contains all charts and detailed analysis. You can open it in any web browser and save as PDF.")
 
         # Strategy Explanation
         st.markdown("---")
