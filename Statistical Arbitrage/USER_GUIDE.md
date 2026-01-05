@@ -1,16 +1,19 @@
-# Pairs Trading Backtester - User Guide
+# Statistical Arbitrage - Pairs Trading Backtester
+
+**Created by Ankit Jhaveri**
 
 ## Table of Contents
 1. [Introduction](#introduction)
-2. [What is Pairs Trading?](#what-is-pairs-trading)
-3. [Requirements](#requirements)
-4. [Installation](#installation)
-5. [How to Run the Backtester](#how-to-run-the-backtester)
-6. [Understanding the Report](#understanding-the-report)
-7. [Choosing Good Pairs](#choosing-good-pairs)
-8. [Troubleshooting](#troubleshooting)
-9. [Files in This Repository](#files-in-this-repository)
-10. [Glossary](#glossary)
+2. [Web App (Easiest Option)](#web-app-easiest-option)
+3. [What is Pairs Trading?](#what-is-pairs-trading)
+4. [Requirements](#requirements)
+5. [Installation](#installation)
+6. [How to Run the Backtester](#how-to-run-the-backtester)
+7. [Understanding the Report](#understanding-the-report)
+8. [Choosing Good Pairs](#choosing-good-pairs)
+9. [Troubleshooting](#troubleshooting)
+10. [Files in This Repository](#files-in-this-repository)
+11. [Glossary](#glossary)
 
 ---
 
@@ -18,7 +21,30 @@
 
 This tool allows you to test a **pairs trading strategy** on any two stocks or ETFs available on Yahoo Finance. It generates a professional HTML report with charts and performance metrics that you can save as a PDF.
 
-**No coding required!** Just run the program and answer a few simple questions.
+**No coding required!** Just use the web app or run the program locally.
+
+---
+
+## Web App (Easiest Option)
+
+**Don't want to install anything?** Use the online web app:
+
+### [Launch Pairs Trading Backtester](https://statarb-pairstrading.streamlit.app)
+
+The web app offers:
+- **No installation required** - runs in your browser
+- **Same features** as the command-line version
+- **Interactive interface** - just fill in the form and click "Run Backtest"
+- **Download reports** - save detailed HTML reports to your computer
+
+### How to Use the Web App
+
+1. Go to the web app link above
+2. Enter two ticker symbols (e.g., GLD and SLV)
+3. Set your date range
+4. Adjust strategy parameters (or use defaults)
+5. Click **"Run Backtest"**
+6. View results and download the HTML report
 
 ---
 
