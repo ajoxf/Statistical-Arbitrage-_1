@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 
 st.set_page_config(
-    page_title="Pairs Trading Backtester",
+    page_title="Statistical Arbitrage - Pairs Trading",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -795,8 +795,8 @@ def main():
     """, unsafe_allow_html=True)
 
     # Header
-    st.markdown('<h1 class="main-header">Pairs Trading Backtester</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Test statistical arbitrage strategies on any two assets</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">Statistical Arbitrage - Pairs Trading</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Created by Ankit Jhaveri</p>', unsafe_allow_html=True)
 
     # Sidebar for inputs
     with st.sidebar:
