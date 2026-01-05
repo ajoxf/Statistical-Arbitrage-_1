@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Statistical Arbitrage Pairs Trading Backtester - Web App
-Streamlit-based web interface for non-technical users
+Statistical Arbitrage - Pairs Trading Backtester
+Web App - Streamlit-based interface for non-technical users
 
-Created by BEL Innovations - Ankit Jhaveri
+Created by Ankit Jhaveri
 
 Run with: streamlit run app.py
 """
@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 
 st.set_page_config(
-    page_title="Statistical Arbitrage - Pairs Trading",
+    page_title="Statistical Arbitrage - Pairs Trading Backtester",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -733,7 +733,7 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
         </div>
 
         <div style="background: #f8f9fa; padding: 20px 30px; text-align: center; color: #666; font-size: 0.9em;">
-            Created by BEL Innovations - Ankit Jhaveri<br>
+            Created by Ankit Jhaveri<br>
             Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         </div>
     </div>
@@ -795,7 +795,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # Header
-    st.markdown('<h1 class="main-header">Statistical Arbitrage - Pairs Trading</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">Statistical Arbitrage - Pairs Trading Backtester</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Created by Ankit Jhaveri</p>', unsafe_allow_html=True)
 
     # Sidebar for inputs
@@ -1306,7 +1306,7 @@ def main():
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666; font-size: 0.9em;'>"
-        "Created by <strong>BEL Innovations - Ankit Jhaveri</strong>"
+        "Created by <strong>Ankit Jhaveri</strong>"
         "</div>",
         unsafe_allow_html=True
     )
