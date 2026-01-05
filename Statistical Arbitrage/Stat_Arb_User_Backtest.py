@@ -1150,23 +1150,42 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
     if not trade_log:
         return '<p>No completed trades to display.</p>'
 
-    # Calculate summary stats
-    winning_trades = [t for t in trade_log if t['net_pnl'] > 0]
-    losing_trades = [t for t in trade_log if t['net_pnl'] <= 0]
+    # Separate completed vs open trades
+    completed_trades = [t for t in trade_log if not t.get('is_open', False)]
+    open_trades = [t for t in trade_log if t.get('is_open', False)]
+
+    # Calculate stats for completed trades only (for win/loss)
+    winning_trades = [t for t in completed_trades if t['net_pnl'] > 0]
+    losing_trades = [t for t in completed_trades if t['net_pnl'] <= 0]
+
+    # Calculate totals INCLUDING open positions (to match final value)
     total_gross_pnl = sum(t['gross_pnl'] for t in trade_log)
     total_fees = sum(t['total_fees'] for t in trade_log)
     total_net_pnl = sum(t['net_pnl'] for t in trade_log)
     avg_holding = sum(t['holding_days'] for t in trade_log) / len(trade_log) if trade_log else 0
 
+    # Open position warning
+    open_warning = ''
+    if open_trades:
+        open_pnl = sum(t['net_pnl'] for t in open_trades)
+        open_warning = f'''
+        <div class="warning-box" style="margin-bottom: 15px;">
+            <strong>⚠️ Open Position:</strong> There is {len(open_trades)} position still open at end of backtest with
+            unrealized P&L of <strong style="color: {'#4CAF50' if open_pnl > 0 else '#F44336'};">${open_pnl:,.2f}</strong>.
+            This is included in totals. Expected Final Value = $100,000 + ${total_net_pnl:,.2f} = <strong>${100000 + total_net_pnl:,.2f}</strong>
+        </div>
+        '''
+
     # Summary section
     html = f'''
+    {open_warning}
     <div class="summary-grid" style="margin-bottom: 20px;">
         <div class="summary-card {'positive' if len(winning_trades) > len(losing_trades) else 'negative'}">
-            <div class="label">Win/Loss</div>
+            <div class="label">Win/Loss (Completed)</div>
             <div class="value">{len(winning_trades)}/{len(losing_trades)}</div>
         </div>
         <div class="summary-card {'positive' if total_gross_pnl > 0 else 'negative'}">
-            <div class="label">Gross P&L</div>
+            <div class="label">Gross P&L (All)</div>
             <div class="value {'positive' if total_gross_pnl > 0 else 'negative'}">${total_gross_pnl:,.2f}</div>
         </div>
         <div class="summary-card negative">
