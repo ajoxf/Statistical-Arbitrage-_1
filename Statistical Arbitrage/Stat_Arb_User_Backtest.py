@@ -748,12 +748,91 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
                 'net_pnl': net_pnl,
                 'return_pct': return_pct,
                 'capital_used': capital_used,
-                'is_stop_loss': is_stop_loss
+                'is_stop_loss': is_stop_loss,
+                'is_open': False  # Completed trade
             })
 
             in_trade = False
             trade_start_idx = None
             trade_direction = 0
+
+    # =========================================================================
+    # Handle OPEN POSITION at end of backtest (not closed)
+    # =========================================================================
+    # If we're still in a trade at the end, add it as an open position
+    # with unrealized P&L based on the last available price
+    if in_trade and trade_start_idx is not None:
+        trade_end_idx = len(df_strategy) - 1  # Last day of backtest
+
+        entry_date = df_strategy.index[trade_start_idx]
+        exit_date = df_strategy.index[trade_end_idx]
+        holding_days = (exit_date - entry_date).days
+
+        # Prices at entry and current (last available)
+        entry_price_1 = df[symbol1].iloc[trade_start_idx]
+        entry_price_2 = df[symbol2].iloc[trade_start_idx]
+        current_price_1 = df[symbol1].iloc[trade_end_idx]
+        current_price_2 = df[symbol2].iloc[trade_end_idx]
+
+        # Shares traded
+        shares_1 = abs(df_strategy['shares_1'].iloc[trade_start_idx])
+        shares_2 = abs(df_strategy['shares_2'].iloc[trade_start_idx])
+
+        # Calculate UNREALIZED P&L for each leg
+        if trade_direction == 1:
+            # Long spread: bought symbol1, sold symbol2
+            pnl_1 = shares_1 * (current_price_1 - entry_price_1)
+            pnl_2 = shares_2 * (entry_price_2 - current_price_2)
+        else:
+            # Short spread: sold symbol1, bought symbol2
+            pnl_1 = shares_1 * (entry_price_1 - current_price_1)
+            pnl_2 = shares_2 * (current_price_2 - entry_price_2)
+
+        gross_pnl = pnl_1 + pnl_2
+
+        # Only entry fees (no exit yet)
+        entry_fees = (
+            df_strategy['commission_1'].iloc[trade_start_idx] +
+            df_strategy['commission_2'].iloc[trade_start_idx] +
+            df_strategy['sec_fee'].iloc[trade_start_idx] +
+            df_strategy['finra_fee'].iloc[trade_start_idx] +
+            df_strategy['spread_cost'].iloc[trade_start_idx]
+        )
+        total_fees = entry_fees  # No exit fees yet
+        net_pnl = gross_pnl - total_fees
+
+        # Z-score at entry and current
+        entry_zscore = df_strategy['z_score'].iloc[trade_start_idx]
+        current_zscore = df_strategy['z_score'].iloc[trade_end_idx]
+
+        # Capital deployed
+        capital_used = shares_1 * entry_price_1 + shares_2 * entry_price_2
+        return_pct = (net_pnl / capital_used * 100) if capital_used > 0 else 0
+
+        trades.append({
+            'trade_num': len(trades) + 1,
+            'direction': ('Long Spread' if trade_direction == 1 else 'Short Spread'),
+            'entry_date': entry_date.strftime('%Y-%m-%d'),
+            'exit_date': 'OPEN',  # Mark as open position
+            'holding_days': holding_days,
+            'entry_zscore': entry_zscore,
+            'exit_zscore': current_zscore,
+            'entry_price_1': entry_price_1,
+            'exit_price_1': current_price_1,
+            'entry_price_2': entry_price_2,
+            'exit_price_2': current_price_2,
+            'shares_1': shares_1,
+            'shares_2': shares_2,
+            'pnl_1': pnl_1,
+            'pnl_2': pnl_2,
+            'gross_pnl': gross_pnl,
+            'total_fees': total_fees,
+            'net_pnl': net_pnl,
+            'return_pct': return_pct,
+            'capital_used': capital_used,
+            'is_stop_loss': False,
+            'is_open': True  # Flag for open position
+        })
 
     return trades
 
@@ -1126,19 +1205,24 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
         pnl_color = '#4CAF50' if trade['net_pnl'] > 0 else '#F44336'
         direction_icon = '📈' if trade['direction'] == 'Long Spread' else '📉'
         stop_loss_marker = ' 🛑' if trade.get('is_stop_loss', False) else ''
+        is_open = trade.get('is_open', False)
+        open_marker = ' ⏳' if is_open else ''
+        row_style = 'background: #FFF3E0;' if is_open else ''  # Orange tint for open positions
+        exit_date_display = f"<span style='color: #FF9800; font-weight: bold;'>{trade['exit_date']}</span>" if is_open else trade['exit_date']
+        pnl_label = '(unrealized)' if is_open else ''
 
         html += f'''
-            <tr>
+            <tr style="{row_style}">
                 <td>{trade['trade_num']}</td>
-                <td>{direction_icon} {trade['direction']}{stop_loss_marker}</td>
+                <td>{direction_icon} {trade['direction']}{stop_loss_marker}{open_marker}</td>
                 <td>{trade['entry_date']}</td>
-                <td>{trade['exit_date']}</td>
+                <td>{exit_date_display}</td>
                 <td>{trade['holding_days']}</td>
                 <td>{trade['entry_zscore']:.2f}</td>
                 <td>{trade['exit_zscore']:.2f}</td>
                 <td style="color: {'#4CAF50' if trade['pnl_1'] > 0 else '#F44336'};">${trade['pnl_1']:,.2f}</td>
                 <td style="color: {'#4CAF50' if trade['pnl_2'] > 0 else '#F44336'};">${trade['pnl_2']:,.2f}</td>
-                <td style="color: {'#4CAF50' if trade['gross_pnl'] > 0 else '#F44336'};">${trade['gross_pnl']:,.2f}</td>
+                <td style="color: {'#4CAF50' if trade['gross_pnl'] > 0 else '#F44336'};">${trade['gross_pnl']:,.2f} {pnl_label}</td>
                 <td style="color: #F44336;">-${trade['total_fees']:,.2f}</td>
                 <td style="color: {pnl_color}; font-weight: bold;">${trade['net_pnl']:,.2f}</td>
                 <td style="color: {pnl_color}; font-weight: bold;">{trade['return_pct']:.2f}%</td>
