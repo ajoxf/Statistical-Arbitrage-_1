@@ -43,25 +43,31 @@ MIN_OBSERVATIONS = 100
 # =============================================================================
 
 IBKR_FEES = {
-    # IBKR Fixed Pricing Commission
+    # IBKR Fixed Pricing Commission (US Stocks)
     'commission_per_share': 0.005,    # $0.005 per share
     'min_commission': 1.00,           # $1.00 minimum per order
     'max_commission_pct': 0.01,       # 1% max of trade value
 
-    # SEC Section 31 Fee (sales only)
+    # SEC Section 31 Fee (sales only, US equities only)
     # Rate: $27.80 per million ($0.0000278 per dollar) through May 13, 2025
     # Rate: $0.00 per million after May 14, 2025
     # Source: https://www.sec.gov/rules-regulations/fee-rate-advisories/2025-2
     'sec_fee_rate': 0.0000278,        # $27.80 per million for historical backtests
 
-    # FINRA Trading Activity Fee (TAF) - PER SHARE, not percentage!
+    # FINRA Trading Activity Fee (TAF) - PER SHARE, not percentage! (US equities only)
     # Rate: $0.000166 per share (max $8.30 per trade)
     # Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
     'finra_taf_per_share': 0.000166,  # $0.000166 per share for sales
     'finra_taf_max': 8.30,            # Maximum $8.30 per trade
 
     # Estimated bid-ask spread cost
-    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps (0.025%) per trade
+    'bid_ask_spread_bps': 2.5,        # Estimated 2.5 bps (0.025%) per trade for stocks
+    'bid_ask_spread_bps_forex': 0.5,  # Forex typically has tighter spreads (0.5 bps)
+
+    # IBKR Forex Commission (basis points on trade value, NOT per share)
+    # Source: https://www.interactivebrokers.com/en/pricing/commissions-spot-currencies.php
+    'forex_commission_bps': 2.0,      # 0.2 bps = 0.00002 (using 2 bps as conservative estimate)
+    'forex_min_commission': 2.00,     # $2.00 minimum per forex order
 }
 
 # ETF symbols that are typically commission-free on IBKR
@@ -183,6 +189,36 @@ def get_user_inputs():
         except ValueError:
             print("Please enter a valid number (or press Enter for default).")
 
+    # Get stop-loss threshold
+    print("\n" + "-"*60)
+    print("STOP-LOSS THRESHOLD (Standard Deviations)")
+    print("-"*60)
+    print("\nThis controls when to exit a losing trade to limit losses.")
+    print("If the z-score moves FURTHER against your position beyond this")
+    print("threshold, the trade will be closed.")
+    print("\n  Example: Entry at -1.5σ, Stop-loss at 3.0σ")
+    print("           If z-score drops to -3.0σ, exit to cut losses.")
+    print("\n  Suggested values:")
+    print("    2.5 σ - Tight stop, exits quickly if trade goes wrong")
+    print("    3.0 σ - Default, balanced risk management")
+    print("    4.0 σ - Wide stop, gives trade more room to recover")
+    print("    0   - No stop-loss (risky!)")
+    print("-"*60)
+
+    while True:
+        stop_input = input(f"\nStop-loss threshold [default: 3.0, 0=disabled]: ").strip()
+        if stop_input == "":
+            stop_loss_threshold = 3.0
+            break
+        try:
+            stop_loss_threshold = float(stop_input)
+            if 0 <= stop_loss_threshold <= 5.0:
+                break
+            else:
+                print("Please enter a value between 0 and 5.0.")
+        except ValueError:
+            print("Please enter a valid number (or press Enter for default).")
+
     # Summary
     print("\n" + "="*60)
     print("BACKTEST CONFIGURATION:")
@@ -191,6 +227,10 @@ def get_user_inputs():
     print(f"  Period: {start_date} to {end_date}")
     print(f"  Lookback Period: {lookback_period} days")
     print(f"  Entry Threshold: {std_threshold} standard deviations")
+    if stop_loss_threshold > 0:
+        print(f"  Stop-Loss: {stop_loss_threshold} standard deviations")
+    else:
+        print(f"  Stop-Loss: Disabled")
     print(f"  Initial Capital: ${INITIAL_CAPITAL:,}")
     print("="*60)
 
@@ -205,7 +245,8 @@ def get_user_inputs():
         'start_date': start_date,
         'end_date': end_date,
         'lookback_period': lookback_period,
-        'std_threshold': std_threshold
+        'std_threshold': std_threshold,
+        'stop_loss_threshold': stop_loss_threshold
     }
 
 # =============================================================================
@@ -323,11 +364,27 @@ def analyze_pair_quality(df, symbol1, symbol2, use_log=True):
         'spread': spread
     }
 
+def is_forex_symbol(symbol):
+    """Check if symbol is a forex/currency pair (Yahoo Finance uses =X suffix)"""
+    symbol_upper = symbol.upper()
+    # Yahoo Finance forex symbols end with =X (e.g., EURUSD=X, GBPCHF=X)
+    if symbol_upper.endswith('=X'):
+        return True
+    # Common forex pair patterns
+    forex_pairs = ['EUR', 'USD', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD', 'CNY', 'HKD']
+    # Check if symbol contains two currency codes
+    for curr1 in forex_pairs:
+        for curr2 in forex_pairs:
+            if curr1 != curr2 and (f'{curr1}{curr2}' in symbol_upper or f'{curr2}{curr1}' in symbol_upper):
+                return True
+    return False
+
+
 def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     """
     Calculate realistic IBKR transaction costs based on official rates.
 
-    Components (sources verified January 2025):
+    For US Stocks (sources verified January 2025):
     - Commission: $0.005/share (min $1, max 1% of trade)
       Source: https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
     - SEC Section 31 Fee: $27.80 per million (sells only)
@@ -335,6 +392,12 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     - FINRA TAF: $0.000166 per SHARE, max $8.30 per trade (sells only)
       Source: https://www.finra.org/rules-guidance/guidance/trading-activity-fee
     - Bid-ask spread: ~2.5 bps estimate (market impact)
+
+    For Forex:
+    - Commission: ~0.2 bps of trade value (using 2 bps as conservative estimate)
+      Source: https://www.interactivebrokers.com/en/pricing/commissions-spot-currencies.php
+    - No SEC fee or FINRA TAF (only applies to US equities)
+    - Tighter bid-ask spreads (~0.5 bps)
     """
     if shares_traded == 0 or price == 0:
         return 0.0, {}
@@ -342,35 +405,51 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     trade_value = abs(shares_traded * price)
     num_shares = abs(shares_traded)
     is_sell = shares_traded < 0
+    is_forex = is_forex_symbol(symbol)
 
-    # Commission (check if commission-free ETF)
-    if symbol.upper() in COMMISSION_FREE_ETFS:
-        commission = 0.0
-        is_commission_free = True
-    else:
-        # IBKR Fixed Pricing: $0.005/share, min $1, max 1% of trade value
+    if is_forex:
+        # Forex commission: basis points on trade value, NOT per share
         commission = max(
-            IBKR_FEES['min_commission'],
-            min(num_shares * IBKR_FEES['commission_per_share'],
-                trade_value * IBKR_FEES['max_commission_pct'])
+            IBKR_FEES['forex_min_commission'],
+            trade_value * (IBKR_FEES['forex_commission_bps'] / 10000)
         )
         is_commission_free = False
 
-    # SEC Section 31 Fee: $27.80 per million = 0.00278% (sells only)
-    sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
-
-    # FINRA TAF: $0.000166 PER SHARE with max $8.30 per trade (sells only)
-    # This is NOT a percentage - it's a flat per-share fee!
-    if is_sell:
-        finra_fee = min(
-            num_shares * IBKR_FEES['finra_taf_per_share'],
-            IBKR_FEES['finra_taf_max']
-        )
-    else:
+        # No SEC fee or FINRA TAF for forex
+        sec_fee = 0
         finra_fee = 0
 
-    # Bid-ask spread cost (market impact, both buys and sells)
-    spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
+        # Tighter bid-ask spread for forex
+        spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps_forex'] / 10000)
+
+    else:
+        # US Stock commission (check if commission-free ETF)
+        if symbol.upper() in COMMISSION_FREE_ETFS:
+            commission = 0.0
+            is_commission_free = True
+        else:
+            # IBKR Fixed Pricing: $0.005/share, min $1, max 1% of trade value
+            commission = max(
+                IBKR_FEES['min_commission'],
+                min(num_shares * IBKR_FEES['commission_per_share'],
+                    trade_value * IBKR_FEES['max_commission_pct'])
+            )
+            is_commission_free = False
+
+        # SEC Section 31 Fee: $27.80 per million = 0.00278% (sells only, US equities)
+        sec_fee = trade_value * IBKR_FEES['sec_fee_rate'] if is_sell else 0
+
+        # FINRA TAF: $0.000166 PER SHARE with max $8.30 per trade (sells only, US equities)
+        if is_sell:
+            finra_fee = min(
+                num_shares * IBKR_FEES['finra_taf_per_share'],
+                IBKR_FEES['finra_taf_max']
+            )
+        else:
+            finra_fee = 0
+
+        # Bid-ask spread cost (market impact, both buys and sells)
+        spread_cost = trade_value * (IBKR_FEES['bid_ask_spread_bps'] / 10000)
 
     total_cost = commission + sec_fee + finra_fee + spread_cost
     cost_pct = total_cost / trade_value if trade_value > 0 else 0
@@ -382,17 +461,20 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
         'finra_fee': finra_fee,
         'spread_cost': spread_cost,
         'total': total_cost,
-        'is_commission_free': is_commission_free
+        'is_commission_free': is_commission_free,
+        'is_forex': is_forex
     }
 
     return cost_pct, breakdown
 
-def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None, std_threshold=None):
-    """Calculate strategy returns with realistic IBKR transaction costs"""
+def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period=None, std_threshold=None, stop_loss_threshold=None):
+    """Calculate strategy returns with realistic IBKR transaction costs and optional stop-loss"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
     lookback = lookback_period if lookback_period else DEFAULT_LOOKBACK_PERIOD
     std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
+    # Stop-loss: 0 or None means disabled
+    use_stop_loss = stop_loss_threshold is not None and stop_loss_threshold > 0
 
     # Calculate bands
     df_strategy = df.copy()
@@ -403,17 +485,38 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['lower_band'] = df_strategy['ma'] - std_threshold * df_strategy['std']
     df_strategy['z_score'] = (spread - df_strategy['ma']) / df_strategy['std']
 
-    # Generate signals
+    # Track stop-loss exits for reporting
+    df_strategy['stop_loss_exit'] = False
+
+    # Generate signals with stop-loss
     df_strategy['position'] = 0.0
     for i in range(lookback, len(df_strategy)):
         prev_pos = df_strategy['position'].iloc[i-1]
         current_spread = df_strategy['spread'].iloc[i]
+        current_zscore = df_strategy['z_score'].iloc[i]
         ma = df_strategy['ma'].iloc[i]
         upper = df_strategy['upper_band'].iloc[i]
         lower = df_strategy['lower_band'].iloc[i]
 
-        # Exit conditions
-        if prev_pos == 1 and current_spread >= ma:
+        # Check stop-loss condition first (if enabled)
+        # Long spread (position=1): we entered when z-score was negative (below -entry_threshold)
+        #   Stop-loss triggers if z-score goes MORE negative (below -stop_loss_threshold)
+        # Short spread (position=-1): we entered when z-score was positive (above +entry_threshold)
+        #   Stop-loss triggers if z-score goes MORE positive (above +stop_loss_threshold)
+        stop_loss_triggered = False
+        if use_stop_loss and prev_pos != 0:
+            if prev_pos == 1 and current_zscore < -stop_loss_threshold:
+                # Long spread hit stop-loss (spread diverged further down)
+                stop_loss_triggered = True
+            elif prev_pos == -1 and current_zscore > stop_loss_threshold:
+                # Short spread hit stop-loss (spread diverged further up)
+                stop_loss_triggered = True
+
+        if stop_loss_triggered:
+            df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
+            df_strategy.iloc[i, df_strategy.columns.get_loc('stop_loss_exit')] = True
+        # Normal exit conditions (mean reversion)
+        elif prev_pos == 1 and current_spread >= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
         elif prev_pos == -1 and current_spread <= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
@@ -432,11 +535,40 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['returns_1'] = df[symbol1].pct_change()
     df_strategy['returns_2'] = df[symbol2].pct_change()
 
-    # Position sizing - calculate actual shares based on position size per leg
-    df_strategy['shares_1'] = (df_strategy['position'] * POSITION_SIZE_PER_LEG / df[symbol1]).round()
-    df_strategy['shares_2'] = (-df_strategy['position'] * hedge_ratio * POSITION_SIZE_PER_LEG / df[symbol2]).round()
+    # =========================================================================
+    # FIXED: Position sizing - shares are LOCKED at entry price, not recalculated daily
+    # =========================================================================
+    # When you enter a trade, you buy a fixed number of shares at the entry price.
+    # Those shares remain constant until you exit the position.
+    # This is how real trading works - you don't rebalance shares daily.
 
-    # Calculate position changes in shares
+    df_strategy['shares_1'] = 0.0
+    df_strategy['shares_2'] = 0.0
+
+    current_shares_1 = 0.0
+    current_shares_2 = 0.0
+
+    for i in range(len(df_strategy)):
+        current_pos = df_strategy['position'].iloc[i]
+        prev_pos = df_strategy['position'].iloc[i-1] if i > 0 else 0
+
+        # Position changed - either entry or exit
+        if current_pos != prev_pos:
+            if current_pos != 0:
+                # ENTRY: Calculate shares at entry price and lock them
+                entry_price_1 = df[symbol1].iloc[i]
+                entry_price_2 = df[symbol2].iloc[i]
+                current_shares_1 = round(current_pos * POSITION_SIZE_PER_LEG / entry_price_1)
+                current_shares_2 = round(-current_pos * hedge_ratio * POSITION_SIZE_PER_LEG / entry_price_2)
+            else:
+                # EXIT: Reset shares to 0
+                current_shares_1 = 0.0
+                current_shares_2 = 0.0
+
+        df_strategy.iloc[i, df_strategy.columns.get_loc('shares_1')] = current_shares_1
+        df_strategy.iloc[i, df_strategy.columns.get_loc('shares_2')] = current_shares_2
+
+    # Calculate position changes in shares (for fee calculation)
     df_strategy['shares_1_change'] = df_strategy['shares_1'].diff().fillna(0)
     df_strategy['shares_2_change'] = df_strategy['shares_2'].diff().fillna(0)
 
@@ -542,6 +674,9 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
             exit_date = df_strategy.index[trade_end_idx]
             holding_days = (exit_date - entry_date).days
 
+            # Check if this was a stop-loss exit
+            is_stop_loss = df_strategy['stop_loss_exit'].iloc[trade_end_idx] if 'stop_loss_exit' in df_strategy.columns else False
+
             # Prices at entry and exit
             entry_price_1 = df[symbol1].iloc[trade_start_idx]
             entry_price_2 = df[symbol2].iloc[trade_start_idx]
@@ -612,12 +747,92 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
                 'total_fees': total_fees,
                 'net_pnl': net_pnl,
                 'return_pct': return_pct,
-                'capital_used': capital_used
+                'capital_used': capital_used,
+                'is_stop_loss': is_stop_loss,
+                'is_open': False  # Completed trade
             })
 
             in_trade = False
             trade_start_idx = None
             trade_direction = 0
+
+    # =========================================================================
+    # Handle OPEN POSITION at end of backtest (not closed)
+    # =========================================================================
+    # If we're still in a trade at the end, add it as an open position
+    # with unrealized P&L based on the last available price
+    if in_trade and trade_start_idx is not None:
+        trade_end_idx = len(df_strategy) - 1  # Last day of backtest
+
+        entry_date = df_strategy.index[trade_start_idx]
+        exit_date = df_strategy.index[trade_end_idx]
+        holding_days = (exit_date - entry_date).days
+
+        # Prices at entry and current (last available)
+        entry_price_1 = df[symbol1].iloc[trade_start_idx]
+        entry_price_2 = df[symbol2].iloc[trade_start_idx]
+        current_price_1 = df[symbol1].iloc[trade_end_idx]
+        current_price_2 = df[symbol2].iloc[trade_end_idx]
+
+        # Shares traded
+        shares_1 = abs(df_strategy['shares_1'].iloc[trade_start_idx])
+        shares_2 = abs(df_strategy['shares_2'].iloc[trade_start_idx])
+
+        # Calculate UNREALIZED P&L for each leg
+        if trade_direction == 1:
+            # Long spread: bought symbol1, sold symbol2
+            pnl_1 = shares_1 * (current_price_1 - entry_price_1)
+            pnl_2 = shares_2 * (entry_price_2 - current_price_2)
+        else:
+            # Short spread: sold symbol1, bought symbol2
+            pnl_1 = shares_1 * (entry_price_1 - current_price_1)
+            pnl_2 = shares_2 * (current_price_2 - entry_price_2)
+
+        gross_pnl = pnl_1 + pnl_2
+
+        # Only entry fees (no exit yet)
+        entry_fees = (
+            df_strategy['commission_1'].iloc[trade_start_idx] +
+            df_strategy['commission_2'].iloc[trade_start_idx] +
+            df_strategy['sec_fee'].iloc[trade_start_idx] +
+            df_strategy['finra_fee'].iloc[trade_start_idx] +
+            df_strategy['spread_cost'].iloc[trade_start_idx]
+        )
+        total_fees = entry_fees  # No exit fees yet
+        net_pnl = gross_pnl - total_fees
+
+        # Z-score at entry and current
+        entry_zscore = df_strategy['z_score'].iloc[trade_start_idx]
+        current_zscore = df_strategy['z_score'].iloc[trade_end_idx]
+
+        # Capital deployed
+        capital_used = shares_1 * entry_price_1 + shares_2 * entry_price_2
+        return_pct = (net_pnl / capital_used * 100) if capital_used > 0 else 0
+
+        trades.append({
+            'trade_num': len(trades) + 1,
+            'direction': ('Long Spread' if trade_direction == 1 else 'Short Spread'),
+            'entry_date': entry_date.strftime('%Y-%m-%d'),
+            'exit_date': 'OPEN',  # Mark as open position
+            'holding_days': holding_days,
+            'entry_zscore': entry_zscore,
+            'exit_zscore': current_zscore,
+            'entry_price_1': entry_price_1,
+            'exit_price_1': current_price_1,
+            'entry_price_2': entry_price_2,
+            'exit_price_2': current_price_2,
+            'shares_1': shares_1,
+            'shares_2': shares_2,
+            'pnl_1': pnl_1,
+            'pnl_2': pnl_2,
+            'gross_pnl': gross_pnl,
+            'total_fees': total_fees,
+            'net_pnl': net_pnl,
+            'return_pct': return_pct,
+            'capital_used': capital_used,
+            'is_stop_loss': False,
+            'is_open': True  # Flag for open position
+        })
 
     return trades
 
@@ -627,16 +842,24 @@ def calculate_performance_metrics(returns_series):
     if len(returns_series) == 0 or returns_series.std() == 0:
         return None
 
-    total_return = (1 + returns_series).prod() - 1
+    # =========================================================================
+    # FIXED: Use SIMPLE SUM for total return, not compound product
+    # =========================================================================
+    # Since daily returns are calculated as daily_pnl / INITIAL_CAPITAL,
+    # they represent percentage of initial capital, not current portfolio.
+    # Therefore, total return = sum of daily returns (not compound product).
+    # This ensures P&L and returns are consistent.
+    total_return = returns_series.sum()
+
     num_years = len(returns_series) / 252
-    annual_return = (1 + total_return) ** (1 / num_years) - 1 if num_years > 0 else 0
+    annual_return = total_return / num_years if num_years > 0 else 0
     volatility = returns_series.std() * np.sqrt(252)
     sharpe_ratio = annual_return / volatility if volatility > 0 else 0
 
-    # Drawdown
-    cumulative = (1 + returns_series).cumprod()
+    # Drawdown - use cumulative sum (not product) for consistency
+    cumulative = returns_series.cumsum()
     peak = cumulative.expanding().max()
-    drawdown = (cumulative - peak) / peak
+    drawdown = cumulative - peak  # Already in percentage terms
     max_drawdown = drawdown.min()
 
     # Other metrics
@@ -684,10 +907,11 @@ def fig_to_base64(fig):
     plt.close(fig)
     return image_base64
 
-def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std_threshold=None):
+def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std_threshold=None, stop_loss_threshold=None):
     """Create all charts and return as base64 encoded images"""
     charts = {}
     std_threshold = std_threshold if std_threshold else DEFAULT_STD_DEV_THRESHOLD
+    use_stop_loss = stop_loss_threshold is not None and stop_loss_threshold > 0
 
     # Set style
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -734,7 +958,8 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
 
     # 3. Portfolio Performance with Trade Markers
     fig, ax = plt.subplots(figsize=(12, 5))
-    portfolio_value = INITIAL_CAPITAL * (1 + df_strategy['strategy_returns']).cumprod()
+    # Use cumulative SUM (not product) since returns are % of initial capital
+    portfolio_value = INITIAL_CAPITAL * (1 + df_strategy['strategy_returns'].cumsum())
     bh1_value = INITIAL_CAPITAL * (1 + df_strategy['returns_1']).cumprod()
     bh2_value = INITIAL_CAPITAL * (1 + df_strategy['returns_2']).cumprod()
 
@@ -770,6 +995,14 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
     ax.axhline(y=0, color='black', linestyle='-', linewidth=1, label='Exit (Mean)')
     ax.fill_between(df_strategy.index, -std_threshold, std_threshold, alpha=0.1, color='gray')
 
+    # Add stop-loss lines if enabled
+    if use_stop_loss:
+        ax.axhline(y=stop_loss_threshold, color='#9C27B0', linestyle=':', linewidth=2, label=f'Stop-Loss (+{stop_loss_threshold}σ)')
+        ax.axhline(y=-stop_loss_threshold, color='#9C27B0', linestyle=':', linewidth=2, label=f'Stop-Loss (-{stop_loss_threshold}σ)')
+        # Shade the stop-loss zones
+        ax.fill_between(df_strategy.index, stop_loss_threshold, 5, alpha=0.05, color='#9C27B0')
+        ax.fill_between(df_strategy.index, -stop_loss_threshold, -5, alpha=0.05, color='#9C27B0')
+
     # Add trade markers on z-score chart
     if len(long_entries) > 0:
         ax.scatter(long_entries, df_strategy.loc[long_entries, 'z_score'],
@@ -781,12 +1014,21 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
         ax.scatter(exits, df_strategy.loc[exits, 'z_score'],
                   marker='o', color='#FFC107', s=60, zorder=5, label='Exit', edgecolors='black', linewidths=0.5)
 
+    # Mark stop-loss exits separately
+    if 'stop_loss_exit' in df_strategy.columns:
+        stop_loss_exits = df_strategy[df_strategy['stop_loss_exit'] == True].index
+        if len(stop_loss_exits) > 0:
+            ax.scatter(stop_loss_exits, df_strategy.loc[stop_loss_exits, 'z_score'],
+                      marker='X', color='#9C27B0', s=100, zorder=6, label='Stop-Loss Exit', edgecolors='black', linewidths=0.5)
+
     ax.set_xlabel('Date', fontsize=12)
     ax.set_ylabel('Z-Score', fontsize=12)
     ax.set_title('Z-Score with Trade Signals', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(-4, 4)
+    # Adjust y-limits based on stop-loss threshold
+    y_limit = max(4, stop_loss_threshold + 1) if use_stop_loss else 4
+    ax.set_ylim(-y_limit, y_limit)
     charts['zscore'] = fig_to_base64(fig)
 
     # 5. Position Over Time
@@ -806,9 +1048,10 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
 
     # 6. Drawdown
     fig, ax = plt.subplots(figsize=(12, 4))
-    cumulative = (1 + df_strategy['strategy_returns']).cumprod()
-    peak = cumulative.expanding().max()
-    drawdown = ((cumulative - peak) / peak) * 100
+    # Use cumulative SUM since returns are % of initial capital
+    cumulative_return = df_strategy['strategy_returns'].cumsum()
+    peak = cumulative_return.expanding().max()
+    drawdown = (cumulative_return - peak) * 100  # Already in percentage terms
     ax.fill_between(df_strategy.index, drawdown, 0, alpha=0.5, color='#F44336')
     ax.plot(df_strategy.index, drawdown, linewidth=1, color='#B71C1C')
     ax.set_xlabel('Date', fontsize=12)
@@ -837,9 +1080,9 @@ def create_charts(df, df_strategy, symbol1, symbol2, pair_analysis, metrics, std
         df_monthly = df_strategy['strategy_returns'].copy()
         df_monthly.index = pd.to_datetime(df_monthly.index)
 
-        # Group by year and month
+        # Group by year and month - use SUM since returns are % of initial capital
         monthly_returns = df_monthly.groupby([df_monthly.index.year, df_monthly.index.month]).apply(
-            lambda x: (1 + x).prod() - 1
+            lambda x: x.sum()
         )
 
         # Create pivot table for heatmap
@@ -907,23 +1150,42 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
     if not trade_log:
         return '<p>No completed trades to display.</p>'
 
-    # Calculate summary stats
-    winning_trades = [t for t in trade_log if t['net_pnl'] > 0]
-    losing_trades = [t for t in trade_log if t['net_pnl'] <= 0]
+    # Separate completed vs open trades
+    completed_trades = [t for t in trade_log if not t.get('is_open', False)]
+    open_trades = [t for t in trade_log if t.get('is_open', False)]
+
+    # Calculate stats for completed trades only (for win/loss)
+    winning_trades = [t for t in completed_trades if t['net_pnl'] > 0]
+    losing_trades = [t for t in completed_trades if t['net_pnl'] <= 0]
+
+    # Calculate totals INCLUDING open positions (to match final value)
     total_gross_pnl = sum(t['gross_pnl'] for t in trade_log)
     total_fees = sum(t['total_fees'] for t in trade_log)
     total_net_pnl = sum(t['net_pnl'] for t in trade_log)
     avg_holding = sum(t['holding_days'] for t in trade_log) / len(trade_log) if trade_log else 0
 
+    # Open position warning
+    open_warning = ''
+    if open_trades:
+        open_pnl = sum(t['net_pnl'] for t in open_trades)
+        open_warning = f'''
+        <div class="warning-box" style="margin-bottom: 15px;">
+            <strong>⚠️ Open Position:</strong> There is {len(open_trades)} position still open at end of backtest with
+            unrealized P&L of <strong style="color: {'#4CAF50' if open_pnl > 0 else '#F44336'};">${open_pnl:,.2f}</strong>.
+            This is included in totals. Expected Final Value = $100,000 + ${total_net_pnl:,.2f} = <strong>${100000 + total_net_pnl:,.2f}</strong>
+        </div>
+        '''
+
     # Summary section
     html = f'''
+    {open_warning}
     <div class="summary-grid" style="margin-bottom: 20px;">
         <div class="summary-card {'positive' if len(winning_trades) > len(losing_trades) else 'negative'}">
-            <div class="label">Win/Loss</div>
+            <div class="label">Win/Loss (Completed)</div>
             <div class="value">{len(winning_trades)}/{len(losing_trades)}</div>
         </div>
         <div class="summary-card {'positive' if total_gross_pnl > 0 else 'negative'}">
-            <div class="label">Gross P&L</div>
+            <div class="label">Gross P&L (All)</div>
             <div class="value {'positive' if total_gross_pnl > 0 else 'negative'}">${total_gross_pnl:,.2f}</div>
         </div>
         <div class="summary-card negative">
@@ -961,19 +1223,25 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
     for trade in trade_log:
         pnl_color = '#4CAF50' if trade['net_pnl'] > 0 else '#F44336'
         direction_icon = '📈' if trade['direction'] == 'Long Spread' else '📉'
+        stop_loss_marker = ' 🛑' if trade.get('is_stop_loss', False) else ''
+        is_open = trade.get('is_open', False)
+        open_marker = ' ⏳' if is_open else ''
+        row_style = 'background: #FFF3E0;' if is_open else ''  # Orange tint for open positions
+        exit_date_display = f"<span style='color: #FF9800; font-weight: bold;'>{trade['exit_date']}</span>" if is_open else trade['exit_date']
+        pnl_label = '(unrealized)' if is_open else ''
 
         html += f'''
-            <tr>
+            <tr style="{row_style}">
                 <td>{trade['trade_num']}</td>
-                <td>{direction_icon} {trade['direction']}</td>
+                <td>{direction_icon} {trade['direction']}{stop_loss_marker}{open_marker}</td>
                 <td>{trade['entry_date']}</td>
-                <td>{trade['exit_date']}</td>
+                <td>{exit_date_display}</td>
                 <td>{trade['holding_days']}</td>
                 <td>{trade['entry_zscore']:.2f}</td>
                 <td>{trade['exit_zscore']:.2f}</td>
                 <td style="color: {'#4CAF50' if trade['pnl_1'] > 0 else '#F44336'};">${trade['pnl_1']:,.2f}</td>
                 <td style="color: {'#4CAF50' if trade['pnl_2'] > 0 else '#F44336'};">${trade['pnl_2']:,.2f}</td>
-                <td style="color: {'#4CAF50' if trade['gross_pnl'] > 0 else '#F44336'};">${trade['gross_pnl']:,.2f}</td>
+                <td style="color: {'#4CAF50' if trade['gross_pnl'] > 0 else '#F44336'};">${trade['gross_pnl']:,.2f} {pnl_label}</td>
                 <td style="color: #F44336;">-${trade['total_fees']:,.2f}</td>
                 <td style="color: {pnl_color}; font-weight: bold;">${trade['net_pnl']:,.2f}</td>
                 <td style="color: {pnl_color}; font-weight: bold;">{trade['return_pct']:.2f}%</td>
@@ -1005,6 +1273,7 @@ def generate_trade_log_html(trade_log, symbol1, symbol2):
             <li><strong>Long Spread:</strong> Bought {symbol1}, Sold {symbol2} (betting spread will increase)</li>
             <li><strong>Short Spread:</strong> Sold {symbol1}, Bought {symbol2} (betting spread will decrease)</li>
             <li><strong>Entry/Exit Z:</strong> Z-score at trade entry and exit (entry should be beyond threshold, exit near 0)</li>
+            <li><strong>🛑 Stop-Loss:</strong> Trade was exited due to stop-loss trigger (z-score exceeded stop-loss threshold)</li>
             <li><strong>Fees:</strong> IBKR commission + SEC fee + FINRA TAF + bid-ask spread</li>
         </ul>
     </div>
@@ -1036,7 +1305,8 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
     symbol2_commission_free = symbol2.upper() in COMMISSION_FREE_ETFS
 
     # Calculate gross vs net returns
-    gross_return = (1 + df_strategy['strategy_returns_gross'].fillna(0)).prod() - 1
+    # Use SUM (not product) since returns are % of initial capital
+    gross_return = df_strategy['strategy_returns_gross'].fillna(0).sum()
     net_return = metrics['total_return']
 
     # Final values
@@ -1049,6 +1319,16 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
 
     # Determine if pair is suitable for pairs trading
     is_suitable = is_cointegrated and is_stationary and pair_analysis['correlation'] > 0.5
+
+    # Calculate TRADE-BASED win rate (not daily returns win rate)
+    if trade_log and len(trade_log) > 0:
+        winning_trades = len([t for t in trade_log if t['net_pnl'] > 0])
+        total_trades = len(trade_log)
+        trade_win_rate = winning_trades / total_trades
+    else:
+        trade_win_rate = 0
+        winning_trades = 0
+        total_trades = 0
 
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -1286,8 +1566,8 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                     <div class="value {'positive' if final_value > INITIAL_CAPITAL else 'negative'}">${final_value:,.0f}</div>
                 </div>
                 <div class="summary-card">
-                    <div class="label">Win Rate</div>
-                    <div class="value">{metrics['win_rate']:.1%}</div>
+                    <div class="label">Trade Win Rate</div>
+                    <div class="value">{trade_win_rate:.1%} ({winning_trades}/{total_trades})</div>
                 </div>
                 <div class="summary-card">
                     <div class="label">Trading Days</div>
@@ -1359,7 +1639,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                     <h3 style="margin-bottom: 15px; color: #1a237e;">Risk Metrics</h3>
                     <table class="metrics-table">
                         <tr><td>Maximum Drawdown</td><td><strong style="color: #F44336;">{metrics['max_drawdown']:.2%}</strong></td></tr>
-                        <tr><td>Win Rate</td><td>{metrics['win_rate']:.1%}</td></tr>
+                        <tr><td>Trade Win Rate</td><td>{trade_win_rate:.1%} ({winning_trades}/{total_trades})</td></tr>
                         <tr><td>Profit Factor</td><td>{metrics['profit_factor']:.2f}</td></tr>
                         <tr><td>Average Win</td><td style="color: #4CAF50;">{metrics['avg_win']*100:.3f}%</td></tr>
                         <tr><td>Average Loss</td><td style="color: #F44336;">-{metrics['avg_loss']*100:.3f}%</td></tr>
@@ -1510,6 +1790,7 @@ def generate_html_report(inputs, df, df_strategy, pair_analysis, metrics, charts
                 <tr><td>Lookback Period</td><td>{inputs['lookback_period']} days</td></tr>
                 <tr><td>Entry Threshold</td><td>{inputs['std_threshold']} standard deviations</td></tr>
                 <tr><td>Exit Threshold</td><td>Mean (0 standard deviations)</td></tr>
+                <tr><td>Stop-Loss Threshold</td><td>{f"{inputs['stop_loss_threshold']} standard deviations" if inputs.get('stop_loss_threshold', 0) > 0 else "Disabled"}</td></tr>
                 <tr><td>Initial Capital</td><td>${INITIAL_CAPITAL:,}</td></tr>
                 <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
                 <tr><td>Fee Model</td><td>IBKR Realistic (commission + SEC + FINRA + spread)</td></tr>
@@ -1661,7 +1942,10 @@ def run_backtest():
 
     # Calculate strategy
     print(f"Calculating strategy returns (lookback: {inputs['lookback_period']} days)...")
-    df_strategy = calculate_strategy_returns(df, inputs['ticker1'], inputs['ticker2'], pair_analysis, inputs['lookback_period'], inputs['std_threshold'])
+    df_strategy = calculate_strategy_returns(
+        df, inputs['ticker1'], inputs['ticker2'], pair_analysis,
+        inputs['lookback_period'], inputs['std_threshold'], inputs['stop_loss_threshold']
+    )
 
     # Calculate metrics
     print("Calculating performance metrics...")
@@ -1679,7 +1963,7 @@ def run_backtest():
     print("Generating charts...")
     charts, final_value = create_charts(
         df, df_strategy, inputs['ticker1'], inputs['ticker2'],
-        pair_analysis, metrics, inputs['std_threshold']
+        pair_analysis, metrics, inputs['std_threshold'], inputs['stop_loss_threshold']
     )
 
     # Extract trade log for P&L analysis
