@@ -408,6 +408,8 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
                 'holding_days': holding_days,
                 'entry_zscore': entry_zscore,
                 'exit_zscore': exit_zscore,
+                'pnl_1': pnl_1,
+                'pnl_2': pnl_2,
                 'gross_pnl': gross_pnl,
                 'total_fees': total_fees,
                 'net_pnl': net_pnl,
@@ -469,6 +471,8 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
             'holding_days': holding_days,
             'entry_zscore': entry_zscore,
             'exit_zscore': current_zscore,
+            'pnl_1': pnl_1,
+            'pnl_2': pnl_2,
             'gross_pnl': gross_pnl,
             'total_fees': total_fees,
             'net_pnl': net_pnl,
@@ -532,10 +536,40 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
     # Calculate additional metrics
     gross_return = df_strategy['strategy_returns_gross'].fillna(0).sum()
     winning_trades = len([t for t in trade_log if t['net_pnl'] > 0 and not t['is_open']])
+    losing_trades = len([t for t in trade_log if t['net_pnl'] <= 0 and not t['is_open']])
     total_completed = len([t for t in trade_log if not t['is_open']])
     trade_win_rate = winning_trades / total_completed if total_completed > 0 else 0
 
-    # Trade log HTML
+    # Trading statistics
+    total_entries = len(trade_log)
+    total_exits = total_completed
+    avg_days_between = len(df) / total_entries if total_entries > 0 else 0
+    fees_pct_capital = (total_fees / INITIAL_CAPITAL) * 100
+    fee_drag = gross_return - metrics['total_return']
+
+    # Trade log summary
+    total_gross_pnl = sum(t['gross_pnl'] for t in trade_log)
+    total_trade_fees = sum(t['total_fees'] for t in trade_log)
+    total_net_pnl = sum(t['net_pnl'] for t in trade_log)
+
+    # Fee breakdown
+    total_commissions = df_strategy['commission_1'].sum() + df_strategy['commission_2'].sum()
+    total_sec = df_strategy['sec_fee'].sum()
+    total_finra = df_strategy['finra_fee'].sum()
+    total_spread = df_strategy['spread_cost'].sum()
+
+    # Determine fee descriptions based on asset types
+    is_forex_1 = is_forex_symbol(symbol1)
+    is_forex_2 = is_forex_symbol(symbol2)
+
+    if is_forex_1 or is_forex_2:
+        comm_desc = "Forex: 2 bps (min $2)"
+        spread_desc = "Estimated 0.5 bps per forex trade"
+    else:
+        comm_desc = "$0.005/share (min $1, max 1%)"
+        spread_desc = "Estimated 2.5 bps per trade"
+
+    # Trade log HTML with per-leg P&L
     trade_rows = ""
     for t in trade_log:
         pnl_color = '#4CAF50' if t['net_pnl'] > 0 else '#F44336'
@@ -543,6 +577,11 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
         stop_marker = ' &#x1F6D1;' if t.get('is_stop_loss', False) else ''
         open_marker = ' &#x23F3;' if t.get('is_open', False) else ''
         exit_display = f"<span style='color: #FF9800;'>{t['exit_date']}</span>" if t.get('is_open') else t['exit_date']
+
+        pnl_1 = t.get('pnl_1', 0)
+        pnl_2 = t.get('pnl_2', 0)
+        pnl_1_color = '#4CAF50' if pnl_1 >= 0 else '#F44336'
+        pnl_2_color = '#4CAF50' if pnl_2 >= 0 else '#F44336'
 
         trade_rows += f"""
         <tr>
@@ -553,6 +592,8 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
             <td>{t['holding_days']}</td>
             <td>{t['entry_zscore']:.2f}</td>
             <td>{t['exit_zscore']:.2f}</td>
+            <td style="color: {pnl_1_color};">${pnl_1:,.2f}</td>
+            <td style="color: {pnl_2_color};">${pnl_2:,.2f}</td>
             <td style="color: {'#4CAF50' if t['gross_pnl'] > 0 else '#F44336'};">${t['gross_pnl']:,.2f}</td>
             <td style="color: #F44336;">-${t['total_fees']:,.2f}</td>
             <td style="color: {pnl_color}; font-weight: bold;">${t['net_pnl']:,.2f}</td>
@@ -698,25 +739,83 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
         </div>
 
         <div class="section">
-            <h2 class="section-title">IBKR Fee Breakdown</h2>
+            <h2 class="section-title">Trading Statistics & IBKR Fees</h2>
+
+            <div class="two-column">
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Trade Count</h3>
+                    <table>
+                        <tr><td>Total Entries</td><td><strong>{total_entries}</strong></td></tr>
+                        <tr><td>Total Exits</td><td><strong>{total_exits}</strong></td></tr>
+                        <tr><td>Round-Trip Trades</td><td><strong>{total_completed}</strong></td></tr>
+                        <tr><td>Trading Days</td><td>{len(df):,}</td></tr>
+                        <tr><td>Avg Days Between Trades</td><td>{avg_days_between:.1f}</td></tr>
+                    </table>
+                </div>
+                <div>
+                    <h3 style="margin-bottom: 15px; color: #1a237e;">Returns Impact</h3>
+                    <table>
+                        <tr><td>Gross Return (Before Fees)</td><td style="color: #4CAF50;">{gross_return:.2%}</td></tr>
+                        <tr><td>Total Fees Paid</td><td><strong style="color: #F44336;">${total_fees:,.2f}</strong></td></tr>
+                        <tr><td>Fees as % of Capital</td><td style="color: #F44336;">{fees_pct_capital:.3f}%</td></tr>
+                        <tr><td>Net Return (After Fees)</td><td><strong>{metrics['total_return']:.2%}</strong></td></tr>
+                        <tr><td>Fee Drag on Returns</td><td style="color: #F44336;">{fee_drag:.2%}</td></tr>
+                    </table>
+                </div>
+            </div>
+
+            <h3 style="margin: 25px 0 15px; color: #1a237e;">IBKR Fee Breakdown</h3>
             <table>
-                <tr><th>Fee Type</th><th>Amount</th></tr>
-                <tr><td>Commissions</td><td>${df_strategy['commission_1'].sum() + df_strategy['commission_2'].sum():,.2f}</td></tr>
-                <tr><td>SEC Fee</td><td>${df_strategy['sec_fee'].sum():,.2f}</td></tr>
-                <tr><td>FINRA TAF</td><td>${df_strategy['finra_fee'].sum():,.2f}</td></tr>
-                <tr><td>Bid-Ask Spread</td><td>${df_strategy['spread_cost'].sum():,.2f}</td></tr>
-                <tr style="font-weight: bold; background: #f8f9fa;"><td>Total Fees</td><td style="color: #F44336;">${total_fees:,.2f}</td></tr>
+                <tr><th>Fee Type</th><th>Amount</th><th>Description</th></tr>
+                <tr><td>Commissions</td><td>${total_commissions:,.2f}</td><td>{comm_desc}</td></tr>
+                <tr><td>SEC Fee</td><td>${total_sec:,.2f}</td><td>0.00278% on sales only</td></tr>
+                <tr><td>FINRA TAF</td><td>${total_finra:,.2f}</td><td>$0.000166/share on sales (max $8.30/trade)</td></tr>
+                <tr><td>Bid-Ask Spread</td><td>${total_spread:,.2f}</td><td>{spread_desc}</td></tr>
+                <tr style="font-weight: bold; background: #f8f9fa;"><td>TOTAL FEES</td><td style="color: #F44336;">${total_fees:,.2f}</td><td></td></tr>
             </table>
+
+            <div class="info-box">
+                <strong>IBKR Fee Summary:</strong><br>
+                {'Forex commission rates apply.' if (is_forex_1 or is_forex_2) else 'Standard IBKR commission rates apply to both symbols.'}
+                <br><br>
+                Over {total_completed} round-trip trades, total IBKR fees of <strong>${total_fees:,.2f}</strong> reduced your gross return of {gross_return:.2%} to a net return of {metrics['total_return']:.2%}.
+                {'<br><br><span style="color: #F44336;">&#x26A0;&#xFE0F; High trading frequency is significantly impacting returns. Consider increasing the lookback period or entry threshold.</span>' if fee_drag > 0.02 else ''}
+            </div>
         </div>
 
         <div class="section">
-            <h2 class="section-title">Trade Log</h2>
+            <h2 class="section-title">Trade-by-Trade P&L Analysis</h2>
+
+            <p style="margin-bottom: 15px; color: #666;">
+                Detailed breakdown of each round-trip trade showing entry/exit prices, P&L per leg, fees, and net returns.
+                This helps identify which trades worked and why.
+            </p>
+
+            <div class="summary-grid" style="margin-bottom: 20px;">
+                <div class="summary-card {'positive' if winning_trades > losing_trades else ''}">
+                    <div class="label">Win/Loss</div>
+                    <div class="value">{winning_trades}/{losing_trades}</div>
+                </div>
+                <div class="summary-card {'positive' if total_gross_pnl > 0 else 'negative'}">
+                    <div class="label">Gross P&L</div>
+                    <div class="value {'positive' if total_gross_pnl > 0 else 'negative'}">${total_gross_pnl:,.2f}</div>
+                </div>
+                <div class="summary-card negative">
+                    <div class="label">Total Fees</div>
+                    <div class="value negative">-${total_trade_fees:,.2f}</div>
+                </div>
+                <div class="summary-card {'positive' if total_net_pnl > 0 else 'negative'}">
+                    <div class="label">Net P&L</div>
+                    <div class="value {'positive' if total_net_pnl > 0 else 'negative'}">${total_net_pnl:,.2f}</div>
+                </div>
+            </div>
+
             <div style="overflow-x: auto;">
-                <table style="font-size: 0.9em;">
+                <table style="font-size: 0.85em;">
                     <thead>
                         <tr style="background: #1a237e; color: white;">
                             <th>#</th><th>Direction</th><th>Entry</th><th>Exit</th><th>Days</th>
-                            <th>Entry Z</th><th>Exit Z</th><th>Gross P&L</th><th>Fees</th><th>Net P&L</th><th>Return</th>
+                            <th>Entry Z</th><th>Exit Z</th><th>{symbol1} P&L</th><th>{symbol2} P&L</th><th>Gross P&L</th><th>Fees</th><th>Net P&L</th><th>Return</th>
                         </tr>
                     </thead>
                     <tbody>
