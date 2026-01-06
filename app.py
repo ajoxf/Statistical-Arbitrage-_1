@@ -208,11 +208,12 @@ def calculate_ibkr_transaction_costs(symbol, price, shares_traded):
     return total_cost / trade_value if trade_value > 0 else 0, breakdown
 
 
-def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period, std_threshold, stop_loss_threshold):
+def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_period, std_threshold, stop_loss_threshold, max_holding_days=0):
     """Calculate strategy returns with transaction costs and optional stop-loss"""
     spread = pair_analysis['spread']
     hedge_ratio = pair_analysis['hedge_ratio']
     use_stop_loss = stop_loss_threshold > 0
+    use_time_stop_loss = max_holding_days > 0
 
     df_strategy = df.copy()
     df_strategy['spread'] = spread
@@ -223,7 +224,11 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
     df_strategy['z_score'] = (spread - df_strategy['ma']) / df_strategy['std']
 
     df_strategy['stop_loss_exit'] = False
+    df_strategy['time_stop_loss_exit'] = False
     df_strategy['position'] = 0.0
+    df_strategy['days_in_trade'] = 0
+
+    trade_entry_idx = None
 
     for i in range(lookback_period, len(df_strategy)):
         prev_pos = df_strategy['position'].iloc[i-1]
@@ -233,29 +238,56 @@ def calculate_strategy_returns(df, symbol1, symbol2, pair_analysis, lookback_per
         upper = df_strategy['upper_band'].iloc[i]
         lower = df_strategy['lower_band'].iloc[i]
 
+        # Track days in trade
+        if prev_pos != 0 and trade_entry_idx is not None:
+            days_held = (df_strategy.index[i] - df_strategy.index[trade_entry_idx]).days
+        else:
+            days_held = 0
+
         stop_loss_triggered = False
+        time_stop_loss_triggered = False
+
+        # Check z-score based stop loss
         if use_stop_loss and prev_pos != 0:
             if prev_pos == 1 and current_zscore < -stop_loss_threshold:
                 stop_loss_triggered = True
             elif prev_pos == -1 and current_zscore > stop_loss_threshold:
                 stop_loss_triggered = True
 
+        # Check time-based stop loss
+        if use_time_stop_loss and prev_pos != 0 and days_held >= max_holding_days:
+            time_stop_loss_triggered = True
+
         if stop_loss_triggered:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
             df_strategy.iloc[i, df_strategy.columns.get_loc('stop_loss_exit')] = True
+            df_strategy.iloc[i, df_strategy.columns.get_loc('days_in_trade')] = days_held
+            trade_entry_idx = None
+        elif time_stop_loss_triggered:
+            df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
+            df_strategy.iloc[i, df_strategy.columns.get_loc('time_stop_loss_exit')] = True
+            df_strategy.iloc[i, df_strategy.columns.get_loc('days_in_trade')] = days_held
+            trade_entry_idx = None
         elif prev_pos == 1 and current_spread >= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
+            df_strategy.iloc[i, df_strategy.columns.get_loc('days_in_trade')] = days_held
+            trade_entry_idx = None
         elif prev_pos == -1 and current_spread <= ma:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
+            df_strategy.iloc[i, df_strategy.columns.get_loc('days_in_trade')] = days_held
+            trade_entry_idx = None
         elif prev_pos == 0:
             if current_spread < lower:
                 df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 1
+                trade_entry_idx = i
             elif current_spread > upper:
                 df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = -1
+                trade_entry_idx = i
             else:
                 df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = 0
         else:
             df_strategy.iloc[i, df_strategy.columns.get_loc('position')] = prev_pos
+            df_strategy.iloc[i, df_strategy.columns.get_loc('days_in_trade')] = days_held
 
     df_strategy['returns_1'] = df[symbol1].pct_change()
     df_strategy['returns_2'] = df[symbol2].pct_change()
@@ -359,6 +391,7 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
             holding_days = (exit_date - entry_date).days
 
             is_stop_loss = df_strategy['stop_loss_exit'].iloc[trade_end_idx] if 'stop_loss_exit' in df_strategy.columns else False
+            is_time_stop_loss = df_strategy['time_stop_loss_exit'].iloc[trade_end_idx] if 'time_stop_loss_exit' in df_strategy.columns else False
 
             entry_price_1 = df[symbol1].iloc[trade_start_idx]
             entry_price_2 = df[symbol2].iloc[trade_start_idx]
@@ -415,6 +448,7 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
                 'net_pnl': net_pnl,
                 'return_pct': return_pct,
                 'is_stop_loss': is_stop_loss,
+                'is_time_stop_loss': is_time_stop_loss,
                 'is_open': False
             })
 
@@ -478,6 +512,7 @@ def extract_trade_log(df, df_strategy, symbol1, symbol2, hedge_ratio):
             'net_pnl': net_pnl,
             'return_pct': return_pct,
             'is_stop_loss': False,
+            'is_time_stop_loss': False,
             'is_open': True
         })
 
@@ -529,7 +564,7 @@ def calculate_performance_metrics(returns_series):
 # =============================================================================
 
 def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period,
-                         std_threshold, stop_loss_threshold, df, df_strategy,
+                         std_threshold, stop_loss_threshold, max_holding_days, df, df_strategy,
                          pair_analysis, metrics, trade_log, final_value, total_fees):
     """Generate a comprehensive HTML report for download"""
 
@@ -575,6 +610,7 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
         pnl_color = '#4CAF50' if t['net_pnl'] > 0 else '#F44336'
         direction_icon = '&#x1F4C8;' if t['direction'] == 'Long Spread' else '&#x1F4C9;'
         stop_marker = ' &#x1F6D1;' if t.get('is_stop_loss', False) else ''
+        time_stop_marker = ' &#x23F0;' if t.get('is_time_stop_loss', False) else ''
         open_marker = ' &#x23F3;' if t.get('is_open', False) else ''
         exit_display = f"<span style='color: #FF9800;'>{t['exit_date']}</span>" if t.get('is_open') else t['exit_date']
 
@@ -586,7 +622,7 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
         trade_rows += f"""
         <tr>
             <td>{t['trade_num']}</td>
-            <td>{direction_icon} {t['direction']}{stop_marker}{open_marker}</td>
+            <td>{direction_icon} {t['direction']}{stop_marker}{time_stop_marker}{open_marker}</td>
             <td>{t['entry_date']}</td>
             <td>{exit_display}</td>
             <td>{t['holding_days']}</td>
@@ -693,7 +729,8 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
                 <tr><th>Parameter</th><th>Value</th></tr>
                 <tr><td>Lookback Period</td><td>{lookback_period} days</td></tr>
                 <tr><td>Entry Threshold</td><td>{std_threshold} standard deviations</td></tr>
-                <tr><td>Stop-Loss</td><td>{'Disabled' if stop_loss_threshold == 0 else f'{stop_loss_threshold} standard deviations'}</td></tr>
+                <tr><td>Z-Score Stop-Loss</td><td>{'Disabled' if stop_loss_threshold == 0 else f'{stop_loss_threshold} standard deviations'}</td></tr>
+                <tr><td>Time-Based Stop-Loss</td><td>{'Disabled' if max_holding_days == 0 else f'{max_holding_days} days'}</td></tr>
                 <tr><td>Position Size per Leg</td><td>${POSITION_SIZE_PER_LEG:,}</td></tr>
             </table>
         </div>
@@ -827,7 +864,7 @@ def generate_html_report(symbol1, symbol2, start_date, end_date, lookback_period
                 <strong>Legend:</strong><br>
                 &#x1F4C8; Long Spread: Bought {symbol1}, Sold {symbol2}<br>
                 &#x1F4C9; Short Spread: Sold {symbol1}, Bought {symbol2}<br>
-                &#x1F6D1; Stop-Loss Exit | &#x23F3; Open Position (unrealized P&L)
+                &#x1F6D1; Z-Score Stop-Loss | &#x23F0; Time Stop-Loss | &#x23F3; Open Position (unrealized P&L)
             </div>
         </div>
 
@@ -971,7 +1008,7 @@ def main():
 
         if stop_loss_enabled:
             stop_loss_threshold = st.slider(
-                "Stop-Loss Threshold",
+                "Stop-Loss Threshold (Z-Score)",
                 min_value=2.0,
                 max_value=5.0,
                 value=3.0,
@@ -980,6 +1017,20 @@ def main():
             )
         else:
             stop_loss_threshold = 0
+
+        time_stop_loss_enabled = st.checkbox("Enable Time-Based Stop Loss", value=False, help="Exit trades after a maximum number of days")
+
+        if time_stop_loss_enabled:
+            max_holding_days = st.slider(
+                "Max Holding Days",
+                min_value=5,
+                max_value=120,
+                value=30,
+                step=5,
+                help="Exit the trade if held longer than this many days"
+            )
+        else:
+            max_holding_days = 0
 
         st.markdown("---")
 
@@ -1027,7 +1078,7 @@ def main():
 
         df_strategy = calculate_strategy_returns(
             df, symbol1, symbol2, pair_analysis,
-            lookback_period, std_threshold, stop_loss_threshold
+            lookback_period, std_threshold, stop_loss_threshold, max_holding_days
         )
 
         # Step 4: Extract trades
@@ -1329,7 +1380,7 @@ def main():
         # Generate HTML Report
         html_report = generate_html_report(
             symbol1, symbol2, str(start_date), str(end_date),
-            lookback_period, std_threshold, stop_loss_threshold,
+            lookback_period, std_threshold, stop_loss_threshold, max_holding_days,
             df, df_strategy, pair_analysis, metrics, trade_log,
             final_value, total_fees
         )
