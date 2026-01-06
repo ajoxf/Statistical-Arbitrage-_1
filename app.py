@@ -1023,11 +1023,11 @@ def main():
         if time_stop_loss_enabled:
             max_holding_days = st.slider(
                 "Max Holding Days",
-                min_value=5,
+                min_value=0,
                 max_value=120,
                 value=30,
-                step=5,
-                help="Exit the trade if held longer than this many days"
+                step=1,
+                help="Exit the trade if held longer than this many days (0 = intraday)"
             )
         else:
             max_holding_days = 0
